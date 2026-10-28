@@ -1,0 +1,26 @@
+# Datos: el dataset anonimizado vive en /data y en el Volume de Databricks, nunca en git.
+/data/
+*.parquet
+# Excepción: la muestra chica de las pruebas (ya anonimizada)
+!tests/data/muestra.parquet
+# Certificado local para la inspección HTTPS del antivirus (solo en esta máquina)
+.certs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Databricks
+.databricks/
+
+# Credenciales locales y salida del front
+.env
+dist/
+
+# Configuración personal del editor
+.vscode/
