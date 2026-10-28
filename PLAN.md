@@ -282,7 +282,7 @@ Resultado (28-oct-2026):
 ## Fase 7. CI
 
 Manual:
-- [ ] En GitHub: Settings → Secrets and variables → Actions, crear `DATABRICKS_HOST` y `DATABRICKS_TOKEN`
+- [x] En GitHub: Settings → Secrets and variables → Actions, crear `DATABRICKS_HOST` y `DATABRICKS_TOKEN`
 - [ ] Activar protección de la rama main: requerir PR y que pase el check de CI
 
 Prompt para Claude Code:
