@@ -16,6 +16,10 @@ El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer e
 - **Los datos no van a git.** `data/` y `*.parquet` están en `.gitignore`; la única excepción es `tests/data/muestra.parquet`, que es un extracto anonimizado.
 - **Nunca pongas tokens ni credenciales** en archivos ni en el chat. Databricks se configura con `databricks configure`; GitHub usa secrets.
 - **Todo el texto va en español:** código, documentos, página y mensajes de commit.
+- **Workflows de GitHub (el repo es público).**
+  - Nunca uses `pull_request_target`.
+  - Los secretos solo van en los pasos que los usan, y nunca en jobs que ejecuten código de un PR de fork.
+  - El usuario de Databricks se oculta en el log con `::add-mask::`, y las acciones van fijadas por commit.
 - **El bundle solo declara el job `demanda_pipeline`.** No agregues a `databricks.yml` schemas, volúmenes, tablas ni modelos como recursos, porque `deploy` y `destroy` podrían cambiarlos o borrarlos. `tests/test_bundle.py` lo verifica.
 
 ## Datos

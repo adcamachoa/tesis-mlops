@@ -22,5 +22,6 @@ venv/
 .env
 dist/
 
-# Configuración personal del editor
+# Configuración personal del editor y de Claude Code (tampoco se sube al workspace con el bundle)
 .vscode/
+.claude/

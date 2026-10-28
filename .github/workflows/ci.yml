@@ -1,0 +1,75 @@
+# CI de cada pull request a main: lint y pruebas dentro de Docker, y validación del bundle de prod.
+#
+# El repo es público, así que:
+# - Solo se usa pull_request, nunca pull_request_target: GitHub no les da secretos a los PR de forks.
+# - El job pruebas no recibe secretos, porque ejecuta el código del PR.
+# - El host y el token de Databricks llegan solo al job bundle, que no corre en PR de forks, y solo a los pasos que
+#   los usan. GitHub oculta sus valores en el log; el usuario de Databricks (un correo) se oculta a mano.
+# - Las acciones van fijadas por commit, no por etiqueta.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# un push nuevo al PR cancela la corrida anterior
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash  # con -o pipefail: si falla un comando de una tubería, falla el paso
+
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false  # el repo se monta en Docker: que no quede el token de GitHub en .git/config
+
+      # Sin .certs/ el Makefile no pasa el certificado local y pip usa los certificados de la imagen
+      - name: Construir la imagen
+        run: make build
+
+      - name: Lint
+        run: make lint
+
+      - name: Pruebas
+        run: make test
+
+  bundle:
+    # solo PR desde ramas de este repo: en un fork no hay secretos
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: databricks/setup-cli@8de769ec2543ee05e456ee2121350efc7efc4bda  # v1.22.1
+        with:
+          version: 1.22.1  # la misma versión que en local
+
+      # validate imprime el usuario de Databricks, que es un correo: se marca para que el log lo muestre como ***
+      - name: Ocultar el usuario de Databricks en el log
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          usuario=$(databricks current-user me --output json | python3 -c 'import json, sys; print(json.load(sys.stdin)["userName"])')
+          test -n "$usuario"
+          echo "::add-mask::$usuario"
+
+      # solo valida la configuración de prod: no despliega, no corre el job ni toca tablas
+      - name: Validar el bundle de prod
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle validate -t prod
