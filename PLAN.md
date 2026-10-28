@@ -387,7 +387,7 @@ Resultado (28-oct-2026):
   | Producción (mezcla) | 35,9 % | 45,7 % | 37,2 % | +6,2 % |
   | Naive estacional | 90,4 % | 90,7 % | 83,2 % | +15,9 % |
 
-  - El champion y el sesgo de los dos LightGBM son los mismos que en dev (+2,7 % y +6,2 %): con los mismos datos, código y semillas, el pipeline es reproducible.
+  - **Coinciden exactamente con dev.** La corrida en dev de la fase 4, con los mismos 8 orígenes, dio los mismos números de la tabla para los tres modelos: WAPE del mes 1, el mes 2 y el total, y el sesgo total. El champion también es el mismo. Con los mismos datos, código y semillas, el pipeline es reproducible entre dev y prod.
 - **`predicciones` de prod.**
   - `workspace.tesis.predicciones` se creó con la corrida 2026-10-28 23:22:23.
   - Quedó con `delta.appendOnly = true` desde el principio: la versión 0 es la escritura y la versión 1 activa la propiedad.
