@@ -25,11 +25,13 @@ El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer e
 
 | Archivo | Grano | Columnas | Filas |
 |---|---|---|---|
-| `ventas_diarias.parquet` | fecha × sku, solo días con venta | `fecha` (date), `sku` (str), `unidades` (int) | 745.909 |
+| `ventas_diarias.parquet` | fecha × sku, solo días con venta | `fecha` (timestamp sin hora), `sku` (str), `unidades` (int) | 745.909 |
 | `stock_diario.parquet` | fecha × sku | `fecha`, `sku`, `stock` (int, ≥ 0) | 12.650.230 |
 | `quiebres_diarios.parquet` | fecha × sku | `fecha`, `sku`, `unidades` (int) | 5.028 |
 | `productos.parquet` | sku | `sku`, `estilo`, `estilo_color`, `talla`, `orden_talla`, `grupo_talla`, `submarca`, `edad`, `departamento`, `categoria`, `tipo_producto`, `es_basico`, `temporada_tipo`, `temporada_anio` | 50.803 |
-| `calendario_eventos.parquet` | evento | `evento`, `tipo`, `fecha_inicio`, `fecha_fin` | 63 |
+| `calendario_eventos.parquet` | evento | `evento`, `tipo`, `fecha_inicio`, `fecha_fin` (timestamp sin hora) | 63 |
+
+Todas las fechas son timestamp a las 00:00, no `date`: Spark las lee como `timestamp_ntz` y pandas como `datetime64`.
 
 **Definiciones**
 
