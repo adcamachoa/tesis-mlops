@@ -180,7 +180,7 @@ Resultado (28-oct-2026):
 - **Por qué el champion no es la mezcla.**
   - En la experimentación se eligió la mezcla porque la auditoría vio que la configuración 2 ganaba pronosticando casi cero en las series chicas.
   - Aquí se respeta la regla fijada antes de ver los resultados: gana el menor WAPE tipo × mes.
-  - La configuración 2 gana en las dos ventanas; en la de la referencia, en los 8 de 8 orígenes.
+  - La configuración 2 gana en las dos ventanas, y en cada una le gana a la mezcla en los 8 de 8 orígenes (WAPE tipo × mes de cada origen). En la ventana reciente, el origen del 20-abr-2026 es casi un empate (44,060 % contra 44,062 %); sin él, serían 7 de 8, que igual cumplen la regla.
   - Cada corrida vuelve a comparar todos los modelos, así que la mezcla recupera el alias si empieza a ganar.
 - **Regla de reemplazo:**
   - un algoritmo distinto le quita el alias al del champion solo si mejora su WAPE tipo × mes y le gana en al menos 6 de los 8 orígenes, para que el champion no cambie por ruido;
