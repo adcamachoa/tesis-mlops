@@ -79,6 +79,36 @@ def pesos_ventanas(perfil: np.ndarray) -> np.ndarray:
     return pesos
 
 
+def fechas_ventanas(origen: pd.Timestamp) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Primer y último día de cada ventana, desde el lunes siguiente al origen."""
+    lunes = origen + pd.Timedelta(weeks=1)
+    fines = np.cumsum(VENTANAS_DIAS)
+    return [
+        (lunes + pd.Timedelta(days=int(fin - dias)), lunes + pd.Timedelta(days=int(fin) - 1))
+        for dias, fin in zip(VENTANAS_DIAS, fines, strict=True)
+    ]
+
+
+def pronostico_por_ventana(predicciones: pd.DataFrame, venta_total: pd.Series, origen: pd.Timestamp) -> pd.Series:
+    """Pronóstico de cada serie en cada ventana, con las 13 semanas de un origen repartidas según el perfil semanal de
+    `venta_total` (indexada por fecha). `predicciones` trae serie, h y pronostico; el resultado va indexado por serie y
+    ventana. Es el mismo reparto con el que se mide el error en `a_ventanas`."""
+    pesos = pesos_ventanas(perfil_semanal(venta_total, origen + pd.Timedelta(weeks=1)))
+    repartido = predicciones["pronostico"].to_numpy(dtype=float)[:, None] * pesos[predicciones["h"].to_numpy(int) - 1]
+    numeros = np.arange(1, len(VENTANAS_DIAS) + 1)
+    return (
+        pd.DataFrame(
+            {
+                "serie": np.repeat(predicciones["serie"].astype(str).to_numpy(), len(numeros)),
+                "ventana": np.tile(numeros, len(predicciones)),
+                "pronostico": repartido.ravel(),
+            }
+        )
+        .groupby(["serie", "ventana"])["pronostico"]
+        .sum()
+    )
+
+
 def a_ventanas(predicciones: pd.DataFrame, venta_diaria: pd.DataFrame) -> pd.DataFrame:
     """Venta real y pronóstico por origen × serie × ventana.
 
@@ -93,19 +123,7 @@ def a_ventanas(predicciones: pd.DataFrame, venta_diaria: pd.DataFrame) -> pd.Dat
     partes = []
     for origen, pred in predicciones.groupby("origen"):
         lunes = origen + pd.Timedelta(weeks=1)
-        pesos = pesos_ventanas(perfil_semanal(venta_total, lunes))
-        repartido = pred["pronostico"].to_numpy(dtype=float)[:, None] * pesos[pred["h"].to_numpy(dtype=int) - 1]
-        pronostico = (
-            pd.DataFrame(
-                {
-                    "serie": np.repeat(pred["serie"].astype(str).to_numpy(), len(numeros)),
-                    "ventana": np.tile(numeros, len(pred)),
-                    "pronostico": repartido.ravel(),
-                }
-            )
-            .groupby(["serie", "ventana"])["pronostico"]
-            .sum()
-        )
+        pronostico = pronostico_por_ventana(pred, venta_total, origen)
         dias = venta_diaria[(venta_diaria["fecha"] >= lunes) & (venta_diaria["fecha"] < lunes + pd.Timedelta(days=91))]
         real = (
             dias.assign(ventana=ventana_del_dia[(dias["fecha"] - lunes).dt.days.to_numpy()])

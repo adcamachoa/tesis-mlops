@@ -6,6 +6,7 @@ import pytest
 from common.metrics import (
     METRICAS,
     a_ventanas,
+    fechas_ventanas,
     formato_estandar,
     mae,
     mape,
@@ -39,6 +40,11 @@ def test_pesos_con_perfil_uniforme():
     np.testing.assert_allclose(pesos[8], [0, 5 / 7, 2 / 7])  # semana 9: sábado y domingo en el mes 3
     enteras = np.delete(pesos, [4, 8], axis=0)
     np.testing.assert_allclose(enteras, np.round(enteras))  # las demás semanas caen enteras en una ventana
+
+
+def test_fechas_de_las_ventanas():
+    dias = pd.to_datetime(["2026-10-19", "2026-11-18", "2026-11-19", "2026-12-18", "2026-12-19", "2027-01-17"])
+    assert fechas_ventanas(pd.Timestamp("2026-10-12")) == list(zip(dias[::2], dias[1::2], strict=True))
 
 
 def test_pesos_reparten_con_el_perfil():

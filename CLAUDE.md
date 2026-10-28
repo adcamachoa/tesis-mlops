@@ -93,6 +93,16 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - un multiplicador sobre una base robusta de n días;
   - repartir las semanas partidas con la forma diaria del año anterior.
 
+## Predicción y resultados
+
+- **Tabla `predicciones`, en piezas.**
+  - Cada fila es una serie en un periodo: `granularidad` = `semana` (periodos 1 a 13) o `ventana` (periodos 1 a 3, de 31, 30 y 30 días).
+  - Cada corrida se agrega a la tabla con `fecha_corrida`, `origen`, `modelo` y `modelo_version`.
+- **`results.json`.** Su esquema está en `src/common/results_schema.py`.
+  - Usa solo la última corrida del origen más reciente, y la última corrida de `metricas_modelos`.
+  - **La página es pública: nunca lleva piezas.** La venta real y el pronóstico van como índice, donde 100 = la venta semanal promedio del total en las 52 semanas mostradas. El factor es el mismo para todas las series, y el MAE y el RMSE se escalan con él.
+  - El índice va con 1 decimal. Con más decimales, cada pieza se vería como un escalón fijo y se podría reconstruir la escala.
+
 ## Ajustes a PLAN.md (28-oct-2026)
 
 Los prompts de las fases 2, 3, 4, 5 y 9 ya están ajustados a estas decisiones:

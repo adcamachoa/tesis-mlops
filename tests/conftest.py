@@ -35,8 +35,8 @@ def calendario() -> pd.DataFrame:
 
 @pytest.fixture(scope="session")
 def sinteticos() -> dict[str, pd.DataFrame]:
-    """`base` (ya con categóricas), `venta_diaria` por serie y `ultima_semana`. Dos SKU por serie, con venta diaria
-    Poisson con forma semanal y más venta en el Hot Sale."""
+    """`base` (ya con categóricas), `panel` semanal, `venta_diaria` por serie y `ultima_semana`. Dos SKU por serie, con
+    venta diaria Poisson con forma semanal y más venta en el Hot Sale."""
     rng = np.random.default_rng(0)
     dias = pd.date_range(INICIO, periods=SEMANAS * 7)
     hot_sale = np.zeros(len(dias))
@@ -71,4 +71,9 @@ def sinteticos() -> dict[str, pd.DataFrame]:
         .groupby(["serie", "fecha"], as_index=False)["unidades"]
         .sum()
     )
-    return {"base": a_categoricas(base), "venta_diaria": venta_diaria, "ultima_semana": panel["semana"].max()}
+    return {
+        "base": a_categoricas(base),
+        "panel": panel,
+        "venta_diaria": venta_diaria,
+        "ultima_semana": panel["semana"].max(),
+    }

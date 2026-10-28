@@ -209,8 +209,27 @@ Propón el plan primero.
 ```
 
 Terminado cuando:
-- [ ] `results.json` cumple el esquema en las pruebas
-- [ ] Commit `fase 5: predicción y export`
+- [x] `results.json` cumple el esquema en las pruebas
+- [x] Commit `fase 5: predicción y export`
+
+Resultado (28-oct-2026):
+- **Corrida en dev.**
+  - El champion (versión 2, `lightgbm_tweedie_211`, entrenado hasta el 12-oct-2026) pronosticó desde ese origen las 464 series con venta en las últimas 52 semanas.
+  - Dejó 7.424 filas en `predicciones`: 13 semanas y 3 ventanas por serie. Las ventanas van del 19-oct al 18-nov, del 19-nov al 18-dic y del 19-dic al 17-ene.
+- **`results.json`** en `/Volumes/workspace/tesis_dev/raw/output/` cumple el esquema.
+  - Trae el total, las 3 submarcas y las 20 series de más venta.
+  - Las métricas son las de la última corrida de train, iguales a las de la fase 4.
+- **Lectura del pronóstico,** en índice (100 = la semana promedio del último año).
+  - Arranca al nivel de las últimas semanas (98 contra cerca de 100) y repite la forma del año anterior, con el pico del Buen Fin en la semana del 9-nov.
+  - El trimestre queda 13 % debajo de las mismas semanas del año anterior. El último año va −9,6 % y el último semestre −12,1 %, pero las últimas 4 semanas van +8,7 %.
+  - La diferencia está en los picos: el Buen Fin queda en 275 contra 332, y diciembre también queda abajo. Se podrá medir cuando llegue la venta real, porque la corrida queda guardada en `predicciones`.
+- **Privacidad.** Con 1 decimal de índice, una pieza vale menos de 0,1, así que la escala no se puede reconstruir. La serie 20 promedia 0,9 por semana, una resolución suficiente para la gráfica.
+
+Pendiente:
+- [ ] **Medir en enero de 2027,** cuando cierre la ventana 3 (17-ene-2027), el pronóstico del origen 12-oct-2026 contra la venta real.
+  - Quedó 13 % debajo de las mismas semanas del año anterior, aunque las últimas 4 semanas antes del origen iban +8,7 %.
+  - Hay que ver si el modelo subpronosticó el Buen Fin y diciembre: WAPE y sesgo por ventana, en el formato estándar.
+  - La corrida está en `workspace.tesis_dev.predicciones`, con `fecha_corrida` 2026-10-28 16:28:09.
 
 ---
 
