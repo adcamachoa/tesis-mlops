@@ -387,7 +387,11 @@ Resultado (28-oct-2026):
   | Producción (mezcla) | 35,9 % | 45,7 % | 37,2 % | +6,2 % |
   | Naive estacional | 90,4 % | 90,7 % | 83,2 % | +15,9 % |
 
-  - **Coinciden exactamente con dev.** La corrida en dev de la fase 4, con los mismos 8 orígenes, dio los mismos números de la tabla para los tres modelos: WAPE del mes 1, el mes 2 y el total, y el sesgo total. El champion también es el mismo. Con los mismos datos, código y semillas, el pipeline es reproducible entre dev y prod.
+- **Comparación con dev, verificada contra MLflow.** Se compararon los runs de `backtest 2026-10-28 13:16` en `/Shared/demanda_tesis_dev` (versión 2) y `backtest 2026-10-28 23:18` en `/Shared/demanda_tesis` (versión 1).
+  - A 1 decimal, los tres modelos de la tabla coinciden en WAPE del mes 1, del mes 2 y total, y en sesgo total. El champion y el orden de los modelos son los mismos.
+  - Con todos los decimales, 4 de los 6 modelos dan idéntico en sus 10 métricas: naive estacional, media móvil, random forest y la configuración 1 de LightGBM.
+  - La configuración 2 y la mezcla difieren como máximo 0,002 puntos en WAPE y 0,005 puntos en sesgo (2,6615 % contra 2,6571 %). El criterio del champion da 43,8259 % en los dos.
+  - Probablemente LightGBM con varios hilos no da resultados idénticos con todos los decimales en máquinas distintas.
 - **`predicciones` de prod.**
   - `workspace.tesis.predicciones` se creó con la corrida 2026-10-28 23:22:23.
   - Quedó con `delta.appendOnly = true` desde el principio: la versión 0 es la escritura y la versión 1 activa la propiedad.
@@ -397,6 +401,11 @@ Resultado (28-oct-2026):
   - Muestra solo la URL de la corrida, con el host como `***`, y los estados `RUNNING` y `TERMINATED SUCCESS`.
   - No trae salida de las tareas ni piezas, y el usuario aparece como `***`.
 - **Para la fase 9.** `pages.yml` se dispara cuando el CD termina con éxito, y eso incluye los merges que solo despliegan. En ese caso la página se reconstruye con el mismo `results.json`: no hace daño, pero se puede filtrar.
+
+Pendiente (opcional):
+- [ ] **Probar `deterministic=True` en LightGBM**, con `force_row_wise` o `force_col_wise` como pide su documentación, para que la configuración 2 dé idéntico entre corridas.
+  - Entrena más lento y no garantiza resultados idénticos en máquinas distintas.
+  - El código no se tocó.
 
 ---
 
