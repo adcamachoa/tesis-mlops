@@ -8,7 +8,8 @@ la versión anotada sea la que pronosticó aunque el alias cambie a mitad de la 
 features en el último origen (el lunes de la última semana completa): las series activas, igual que en el backtest. El
 pronóstico semanal se reparte en las ventanas de 31, 30 y 30 días con common.metrics, el mismo reparto con que se mide
 el error. Agrega a <catalogo>.<schema>.predicciones una fila por serie y semana y otra por serie y ventana, en piezas;
-las corridas anteriores se conservan.
+las corridas anteriores se conservan. Si la tabla no tiene delta.appendOnly (al crearla), se la activa: desde ahí Delta
+rechaza reemplazarla, borrar filas o editarlas.
 """
 import argparse
 
@@ -39,6 +40,15 @@ def revisar_entrenamiento(entrenado_hasta: pd.Timestamp, origen: pd.Timestamp) -
     if entrenado_hasta < origen:
         print(f"aviso: el champion se entrenó hasta la semana del {entrenado_hasta.date()} y el origen es el "
               f"{origen.date()}; el pronóstico no aprovecha las semanas intermedias")
+
+
+def proteger_solo_agregar(spark, destino: str) -> None:
+    """Activa delta.appendOnly en `destino` si todavía no la tiene. Solo cambia la tabla la primera vez, al crearla;
+    después solo lee la propiedad, así que no agrega versiones al historial."""
+    propiedades = {fila["key"]: fila["value"] for fila in spark.sql(f"SHOW TBLPROPERTIES {destino}").collect()}
+    if propiedades.get("delta.appendOnly") != "true":
+        spark.sql(f"ALTER TABLE {destino} SET TBLPROPERTIES ('delta.appendOnly' = 'true')")
+        print(f"{destino}: delta.appendOnly = true")
 
 
 def tabla_predicciones(
@@ -116,6 +126,7 @@ def main():
     spark.createDataFrame(a_spark).write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(
         tabla("predicciones")
     )
+    proteger_solo_agregar(spark, tabla("predicciones"))
     ventanas = predicciones[predicciones["granularidad"] == "ventana"].groupby("periodo")["pronostico"].sum()
     print(f"{tabla('predicciones')}: {len(predicciones):,} filas de la corrida {fecha_corrida}")
     print("pronóstico del total por ventana: " + ", ".join(f"{v:,.0f}" for v in ventanas))
