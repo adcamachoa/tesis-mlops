@@ -63,9 +63,9 @@ Terminado cuando:
 ## Fase 2. Datos en el Volume e ingesta
 
 Manual:
-- [ ] En el SQL editor de Databricks: `CREATE SCHEMA IF NOT EXISTS workspace.tesis;` y `CREATE VOLUME IF NOT EXISTS workspace.tesis.raw;`
-- [ ] Repetir para `workspace.tesis_dev`
-- [ ] Subir los cinco parquet de `data/` desde Catalog → workspace → tesis → raw → Upload to this volume (y también en tesis_dev), o desde la terminal:
+- [x] En el SQL editor de Databricks: `CREATE SCHEMA IF NOT EXISTS workspace.tesis;` y `CREATE VOLUME IF NOT EXISTS workspace.tesis.raw;`
+- [x] Repetir para `workspace.tesis_dev`
+- [x] Subir los cinco parquet de `data/` desde Catalog → workspace → tesis → raw → Upload to this volume (y también en tesis_dev), o desde la terminal:
   `foreach ($f in Get-ChildItem data\*.parquet) { databricks fs cp $f.FullName "dbfs:/Volumes/workspace/tesis_dev/raw/$($f.Name)" --overwrite }`
 - [x] Muestra pequeña local en `tests/data/muestra.parquet` (164 filas de `ventas_diarias`, ya anonimizada)
 
@@ -86,8 +86,8 @@ y casos sintéticos que fallen a propósito. Propón el plan primero.
 ```
 
 Terminado cuando:
-- [ ] Pruebas de validación pasan en local
-- [ ] Commit `fase 2: ingesta y validación de datos`
+- [x] Pruebas de validación pasan en local
+- [x] Commit `fase 2: ingesta y validación de datos`
 
 ---
 
