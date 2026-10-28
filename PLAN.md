@@ -331,18 +331,18 @@ Ajuste al prompt (28-oct-2026): el merge despliega, pero no corre el job. Correr
 
 Manual:
 - [x] Crear el schema `workspace.tesis` con su Volume y parquet si no lo hiciste (fase 2)
-- [ ] En GitHub, **antes del merge**: Settings → Environments → New environment `prod`
+- [x] En GitHub, **antes del merge**: Settings → Environments → New environment `prod`
   - Required reviewers: tu usuario, con "Prevent self-review" sin marcar.
   - Deployment branches: solo `main`.
   - Si no existe al hacer el merge, GitHub lo crea sin reglas y despliega sin pedir aprobación.
-- [ ] Hacer merge del PR y aprobar el despliegue
-- [ ] Primera corrida en prod: `gh workflow run cd.yml --ref main -f correr=true`, y aprobarla
+- [x] Hacer merge del PR y aprobar el despliegue
+- [x] Primera corrida en prod: `gh workflow run cd.yml --ref main -f correr=true`, y aprobarla
 
 Terminado cuando:
-- [ ] El merge a main despliega en prod después de la aprobación, sin correr el job
-- [ ] La corrida manual termina en verde en prod
-- [ ] `workspace.tesis_dev.predicciones` sigue igual: mismo historial y la corrida del 2026-10-28 16:28:09 intacta
-- [ ] Commit `fase 8: CD`
+- [x] El merge a main despliega en prod después de la aprobación, sin correr el job
+- [x] La corrida manual termina en verde en prod
+- [x] `workspace.tesis_dev.predicciones` sigue igual: mismo historial y la corrida del 2026-10-28 16:28:09 intacta
+- [x] Commit `fase 8: CD`
 
 Diseño:
 - **Cuándo corre.** `.github/workflows/cd.yml` corre en push a main y con `workflow_dispatch`, nunca en un PR.
@@ -370,6 +370,42 @@ Diseño:
   - que no haya `pull_request_target` y que las acciones vayan fijadas por commit;
   - que los secretos estén solo en el env de los pasos, y la máscara del usuario antes del bundle;
   - en el CD: solo main, solo `-t prod`, nada de `tesis_dev`, y la corrida solo con la casilla y sin su salida.
+
+Resultado (28-oct-2026):
+- **Merge (PR #2).**
+  - El CD esperó la aprobación y desplegó en 1 minuto: creó el job `demanda_pipeline` en prod y subió 25 archivos.
+  - El paso que corre el job se saltó, como debía.
+- **Primera corrida en prod**, con `workflow_dispatch` y la casilla `correr`.
+  - El despliegue no cambió nada (`1 unchanged`), y el job tardó 41 minutos con todas las tareas en verde.
+  - Backtest: 8 orígenes, del 29-dic-2025 al 13-jul-2026, los mismos que en dev.
+  - `lightgbm_tweedie_211` quedó de champion como versión 1 de `workspace.tesis.demanda_forecast`. Prod no tenía champion, así que el mejor modelo recibió el alias.
+  - Pronosticó desde el origen del 12-oct-2026, con datos hasta el 18-oct-2026.
+
+  | Modelo | WAPE M1 | WAPE M2 | WAPE Total | Sesgo total |
+  |---|---|---|---|---|
+  | `lightgbm_tweedie_211` (champion) | 35,5 % | 45,0 % | 36,4 % | +2,7 % |
+  | Producción (mezcla) | 35,9 % | 45,7 % | 37,2 % | +6,2 % |
+  | Naive estacional | 90,4 % | 90,7 % | 83,2 % | +15,9 % |
+
+- **Comparación con dev, verificada contra MLflow.** Se compararon los runs de `backtest 2026-10-28 13:16` en `/Shared/demanda_tesis_dev` (versión 2) y `backtest 2026-10-28 23:18` en `/Shared/demanda_tesis` (versión 1).
+  - A 1 decimal, los tres modelos de la tabla coinciden en WAPE del mes 1, del mes 2 y total, y en sesgo total. El champion y el orden de los modelos son los mismos.
+  - Con todos los decimales, 4 de los 6 modelos dan idéntico en sus 10 métricas: naive estacional, media móvil, random forest y la configuración 1 de LightGBM.
+  - La configuración 2 y la mezcla difieren como máximo 0,002 puntos en WAPE y 0,005 puntos en sesgo (2,6615 % contra 2,6571 %). El criterio del champion da 43,8259 % en los dos.
+  - Probablemente LightGBM con varios hilos no da resultados idénticos con todos los decimales en máquinas distintas.
+- **`predicciones` de prod.**
+  - `workspace.tesis.predicciones` se creó con la corrida 2026-10-28 23:22:23.
+  - Quedó con `delta.appendOnly = true` desde el principio: la versión 0 es la escritura y la versión 1 activa la propiedad.
+- **`results.json`** quedó en `/Volumes/workspace/tesis/raw/output/`.
+- **Dev intacto.** `workspace.tesis_dev.predicciones` sigue en la versión 2, con el último cambio a las 17:47:16 UTC y `appendOnly`, igual que antes de la corrida.
+- **Log público.**
+  - Muestra solo la URL de la corrida, con el host como `***`, y los estados `RUNNING` y `TERMINATED SUCCESS`.
+  - No trae salida de las tareas ni piezas, y el usuario aparece como `***`.
+- **Para la fase 9.** `pages.yml` se dispara cuando el CD termina con éxito, y eso incluye los merges que solo despliegan. En ese caso la página se reconstruye con el mismo `results.json`: no hace daño, pero se puede filtrar.
+
+Pendiente (opcional):
+- [ ] **Probar `deterministic=True` en LightGBM**, con `force_row_wise` o `force_col_wise` como pide su documentación, para que la configuración 2 dé idéntico entre corridas.
+  - Entrena más lento y no garantiza resultados idénticos en máquinas distintas.
+  - El código no se tocó.
 
 ---
 
