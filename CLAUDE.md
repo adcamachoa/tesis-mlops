@@ -63,14 +63,25 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - Producción = promedio de dos configuraciones:
     - potencia 1,2 y 63 hojas, con parada temprana;
     - potencia 1,76, 211 hojas y 449 rondas.
-  - Cada una con 3 semillas promediadas.
+  - Cada una con 3 semillas promediadas (7, 8 y 9).
+  - Parada temprana: una sola por origen, con la semilla 7, y mínimo 50 rondas.
+    - El examen son las filas de los 13 orígenes internos de origen − 25 a origen − 13 semanas.
+    - El ajuste usa las filas con semana objetivo hasta origen − 25.
+    - Con esas rondas se entrenan las 3 semillas sobre todo lo conocido hasta el origen.
+  - Los hiperparámetros completos están en `src/common/modelos.py`.
 - **Variables:** historia de la serie (promedios, rezagos, tendencia, crecimiento contra el año anterior), surtido (estilos-color con venta, lanzamientos), jerarquía (categóricas), calendario (eventos, quincenas, semana del año), stock y disponibilidad, y la misma semana del año anterior.
 - **Evaluación.**
   - Backtest con orígenes mensuales (rolling origin), sin fechas futuras en el entrenamiento.
   - Ventanas de 31, 30 y 30 días desde el lunes siguiente al origen.
+    - La venta real de cada ventana sale de la venta diaria, con todas las series. Las que no están en la base cuentan con pronóstico 0.
+    - El pronóstico de las semanas partidas (la 5 y la 9) se reparte con el perfil por día de la semana de la venta total de las 52 semanas previas al lunes siguiente al origen; 1/7 por día si no hubo venta.
   - **Formato obligatorio para comparar modelos:** WAPE mes 1, mes 2 y total (el trimestre); MAPE mes 1, mes 2 y total; y al final el sesgo total. Todo a nivel tipo de producto.
   - El MAPE va solo como referencia y se calcula sobre los nodos con venta.
-- **Referencia a replicar:** desarrollo, 8 orígenes de ago-2025 a feb-2026.
+- **Champion.**
+  - El mejor modelo es el de menor WAPE tipo de producto × mes, con las tres ventanas juntas.
+  - Para quitarle el alias al algoritmo del champion, un algoritmo distinto tiene que mejorar su WAPE tipo × mes en el mismo backtest y ganarle en al menos 6 de los 8 orígenes.
+  - Si gana el mismo algoritmo, la versión reentrenada recibe el alias. Si el retador no lo logra, se reentrena y registra el algoritmo del champion, que conserva el alias.
+- **Referencia a replicar:** desarrollo, 8 orígenes de ago-2025 a feb-2026 (del 11-ago-2025 al 23-feb-2026, cada 4 semanas: `--ultimo-origen 2026-02-23`).
 
   | Modelo | WAPE M1 | WAPE M2 | WAPE Total | Sesgo total |
   |---|---|---|---|---|
@@ -109,7 +120,7 @@ src/
   predict.py           pronóstico con el champion → tabla predicciones
   export_results.py    results.json para la página
   common/              funciones puras en pandas, con pruebas
-    validation.py  features.py  metrics.py  backtest.py  results_schema.py
+    validation.py  features.py  metrics.py  backtest.py  modelos.py  results_schema.py
 tests/                 pruebas (pytest) y tests/data/ (muestra.parquet, results.json de ejemplo)
 front/                 template.html y build.py → dist/index.html
 databricks.yml         Asset Bundle: job demanda_pipeline, targets dev y prod

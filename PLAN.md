@@ -160,10 +160,31 @@ Usa mlflow.set_registry_uri("databricks-uc"). Propón el plan primero.
 ```
 
 Terminado cuando:
-- [ ] Métricas y backtest con pruebas
-- [ ] En MLflow aparece un run por algoritmo con sus métricas
-- [ ] El modelo existe en Unity Catalog con alias `champion`
-- [ ] Commit `fase 4: entrenamiento y evaluación de algoritmos`
+- [x] Métricas y backtest con pruebas
+- [x] En MLflow aparece un run por algoritmo con sus métricas
+- [x] El modelo existe en Unity Catalog con alias `champion`
+- [x] Commit `fase 4: entrenamiento y evaluación de algoritmos`
+
+Resultado (28-oct-2026):
+- **Réplica de la referencia, en local** con los mismos 8 orígenes (11-ago-2025 a 23-feb-2026) y la misma métrica:
+
+  | Modelo | WAPE M1 | WAPE M2 | WAPE Total | MAPE M1 | MAPE M2 | MAPE Total | Sesgo total |
+  |---|---|---|---|---|---|---|---|
+  | Naive estacional | 76,4 % | 78,3 % | 70,5 % | 231,3 % | 234,7 % | 362,8 % | +7,3 % |
+  | Producción (mezcla) | 33,8 % | 44,0 % | 36,1 % | 80,3 % | 112,4 % | 112,6 % | +1,8 % |
+  | Configuración 2 sola | 31,9 % | 42,6 % | 34,6 % | 66,3 % | 95,6 % | 80,4 % | −3,5 % |
+
+  - El naive estacional da idéntico a la referencia, así que la métrica se calcula igual.
+  - La mezcla queda en 36,1 % contra 35,8 % de la referencia, y el sesgo en +1,8 % contra +4,2 %. Como el naive coincide, la diferencia viene del modelo o de las variables, no de la métrica.
+- **Corrida en dev** con los 8 orígenes más recientes (29-dic-2025 a 13-jul-2026): la configuración 2 (`lightgbm_tweedie_211`) tiene WAPE tipo × mes de 43,8 % contra 44,6 % de la mezcla, y sesgo total de +2,7 % contra +6,2 %. Quedó como champion en la versión 2 de `workspace.tesis_dev.demanda_forecast`. La versión 1 es la prueba de humo.
+- **Por qué el champion no es la mezcla.**
+  - En la experimentación se eligió la mezcla porque la auditoría vio que la configuración 2 ganaba pronosticando casi cero en las series chicas.
+  - Aquí se respeta la regla fijada antes de ver los resultados: gana el menor WAPE tipo × mes.
+  - La configuración 2 gana en las dos ventanas; en la de la referencia, en los 8 de 8 orígenes.
+  - Cada corrida vuelve a comparar todos los modelos, así que la mezcla recupera el alias si empieza a ganar.
+- **Regla de reemplazo:**
+  - un algoritmo distinto le quita el alias al del champion solo si mejora su WAPE tipo × mes y le gana en al menos 6 de los 8 orígenes, para que el champion no cambie por ruido;
+  - si el retador no lo logra, se reentrena el algoritmo del champion.
 
 ---
 
