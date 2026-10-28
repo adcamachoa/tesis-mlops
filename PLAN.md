@@ -117,8 +117,8 @@ datos en el origen y comprobando que las variables no cambian). Propón el plan 
 ```
 
 Terminado cuando:
-- [ ] Prueba explícita de "sin fuga de información" pasa
-- [ ] Commit `fase 3: features`
+- [x] Prueba explícita de "sin fuga de información" pasa
+- [x] Commit `fase 3: features`
 
 ---
 
@@ -148,6 +148,10 @@ Ejecuta la Fase 4 de PLAN.md. Crea:
      del formato estándar más MAE y RMSE, la versión Delta de la tabla de entrada
      (task value bronze_version) y una gráfica real vs pronóstico del total como
      artefacto
+   - al medir el error, sume la venta real de las series que no están en la base
+     para ese origen (series nuevas o sin venta en las 52 semanas previas) con
+     pronóstico 0, tomándola de panel_semanal: la tabla features solo trae las
+     series activas en el origen, y sin esa venta el error del total queda corto
    - escriba un resumen comparativo en la tabla metricas_modelos
    - registre el mejor modelo (menor WAPE tipo de producto × mes, con las tres
      ventanas juntas) en Unity Catalog como workspace.<schema>.demanda_forecast
