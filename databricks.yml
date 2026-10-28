@@ -13,11 +13,10 @@ variables:
   schema:
     description: Schema con el Volume raw y las tablas. No tiene valor por defecto, así que cada target fija el suyo.
 
-# data/ y .certs/ no se suben porque están en .gitignore
+# data/, .certs/ y .claude/ no se suben porque están en .gitignore
 sync:
   exclude:
     - tests/**
-    - .claude/**
 
 resources:
   jobs:

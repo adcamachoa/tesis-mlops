@@ -283,7 +283,7 @@ Resultado (28-oct-2026):
 
 Manual:
 - [x] En GitHub: Settings → Secrets and variables → Actions, crear `DATABRICKS_HOST` y `DATABRICKS_TOKEN`
-- [ ] Activar protección de la rama main: requerir PR y que pase el check de CI
+- [x] Activar protección de la rama main: requerir PR y que pase el check de CI
 
 Prompt para Claude Code:
 
@@ -296,8 +296,22 @@ Propón el plan primero.
 ```
 
 Terminado cuando:
-- [ ] Un PR de prueba muestra el check de CI en verde
-- [ ] Commit `fase 7: CI`
+- [x] Un PR de prueba muestra el check de CI en verde
+- [x] Commit `fase 7: CI`
+
+Resultado (28-oct-2026):
+- **CI.** `.github/workflows/ci.yml` corre en cada PR a main y tiene dos jobs; los dos pasaron en el PR de la fase:
+  - `pruebas`, sin secretos: build de la imagen, `make lint` y `make test`. Tardó cerca de 2 minutos. En GitHub la imagen se construye sin el certificado local.
+  - `bundle`: `databricks bundle validate -t prod`, con la CLI 1.22.1. Solo valida la configuración: no despliega, no corre el job ni toca tablas.
+- **Seguridad.**
+  - Solo `pull_request`, nunca `pull_request_target`. Los PR de forks no reciben secretos y el job `bundle` no corre en ellos.
+  - El host y el token solo llegan a los dos pasos que los usan. El usuario de Databricks se marca para que el log lo muestre como `***`: el log del PR no tiene el correo, el host ni el token.
+  - Las acciones van fijadas por commit, el token del workflow solo lee y los PR de forks requieren aprobación.
+- **Protección de main:** un ruleset sin bypass exige PR y los checks `pruebas` y `bundle`, y bloquea borrar la rama y forzar pushes.
+- **Token de GitHub Actions.**
+  - Es distinto del token local y vence a los 120 días, el **25-feb-2027**.
+  - Para renovarlo: generar uno nuevo en Databricks (Settings → Developer → Access tokens), reemplazar el secreto `DATABRICKS_TOKEN` y revocar el anterior.
+  - Si vence antes, el job `bundle` falla por autenticación.
 
 ---
 
