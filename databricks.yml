@@ -1,0 +1,90 @@
+# Asset Bundle del pipeline de demanda: el job demanda_pipeline con las cinco tareas encadenadas.
+#   databricks bundle validate -t dev
+#   databricks bundle deploy -t dev
+#   databricks bundle run -t dev demanda_pipeline
+#
+# Sin host ni token: salen del perfil de `databricks configure` en local y de los secrets en CI.
+# El bundle solo declara el job. Los schemas, volúmenes, tablas y el modelo de Unity Catalog no son recursos del
+# bundle, así que deploy y destroy nunca los crean, cambian ni borran.
+bundle:
+  name: tesis-mlops
+
+variables:
+  schema:
+    description: Schema con el Volume raw y las tablas. No tiene valor por defecto, así que cada target fija el suyo.
+
+# data/ y .certs/ no se suben porque están en .gitignore
+sync:
+  exclude:
+    - tests/**
+    - .claude/**
+
+resources:
+  jobs:
+    demanda_pipeline:
+      name: demanda_pipeline
+      # una corrida a la vez: dos juntas se pisarían las tablas bronze y features
+      max_concurrent_runs: 1
+      # train tardó hasta 35 min en la fase 4; si algo se cuelga, se corta antes de gastar la cuota
+      timeout_seconds: 7200
+      # semanal y en pausa para no consumir cuota; en dev, el modo development la pausa de todos modos
+      schedule:
+        quartz_cron_expression: "0 0 7 ? * MON"
+        timezone_id: America/Mexico_City
+        pause_status: PAUSED
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "2"  # Python 3.11, como la imagen de Docker
+            dependencies:
+              - "-r ${workspace.file_path}/requirements.txt"
+      tasks:
+        # ingest publica bronze_version como task value y train la lee con este task_key
+        - task_key: ingest
+          environment_key: default
+          spark_python_task:
+            python_file: src/ingest.py
+            parameters: ["--schema", "${var.schema}"]
+        - task_key: features
+          depends_on:
+            - task_key: ingest
+          environment_key: default
+          spark_python_task:
+            python_file: src/features.py
+            parameters: ["--schema", "${var.schema}"]
+        - task_key: train
+          depends_on:
+            - task_key: features
+          environment_key: default
+          spark_python_task:
+            python_file: src/train.py
+            parameters: ["--schema", "${var.schema}"]
+        # predict solo agrega filas a predicciones: las corridas anteriores se conservan
+        - task_key: predict
+          depends_on:
+            - task_key: train
+          environment_key: default
+          spark_python_task:
+            python_file: src/predict.py
+            parameters: ["--schema", "${var.schema}"]
+        - task_key: export
+          depends_on:
+            - task_key: predict
+          environment_key: default
+          spark_python_task:
+            python_file: src/export_results.py
+            parameters: ["--schema", "${var.schema}"]
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      schema: tesis_dev
+  prod:
+    mode: production
+    workspace:
+      # una sola copia en prod; el usuario sale de la conexión, así que el correo no queda en el repo
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      schema: tesis

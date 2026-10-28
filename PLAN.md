@@ -229,7 +229,7 @@ Pendiente:
 - [ ] **Medir en enero de 2027,** cuando cierre la ventana 3 (17-ene-2027), el pronóstico del origen 12-oct-2026 contra la venta real.
   - Quedó 13 % debajo de las mismas semanas del año anterior, aunque las últimas 4 semanas antes del origen iban +8,7 %.
   - Hay que ver si el modelo subpronosticó el Buen Fin y diciembre: WAPE y sesgo por ventana, en el formato estándar.
-  - La corrida está en `workspace.tesis_dev.predicciones`, con `fecha_corrida` 2026-10-28 16:28:09.
+  - La corrida está en `workspace.tesis_dev.predicciones`, con `fecha_corrida` 2026-10-28 16:28:09, y tiene un respaldo en `workspace.tesis_dev.predicciones_respaldo_20261028` (las mismas 7.424 filas).
 
 ---
 
@@ -251,13 +251,31 @@ para validar y desplegar en dev, pero no los ejecutes.
 ```
 
 Manual:
-- [ ] `databricks bundle validate -t dev`
-- [ ] `databricks bundle deploy -t dev`
-- [ ] `databricks bundle run -t dev demanda_pipeline` y revisar que todas las tareas terminen en verde
+- [x] `databricks bundle validate -t dev`
+- [x] `databricks bundle deploy -t dev`
+- [x] `databricks bundle run -t dev demanda_pipeline` y revisar que todas las tareas terminen en verde
 
 Terminado cuando:
-- [ ] El job corre completo en dev y deja `results.json` en el Volume
-- [ ] Commit `fase 6: asset bundle y job`
+- [x] El job corre completo en dev y deja `results.json` en el Volume
+- [x] Commit `fase 6: asset bundle y job`
+
+Resultado (28-oct-2026):
+- **Bundle.**
+  - `databricks.yml` solo declara el job; las tablas, los volúmenes y el modelo quedan fuera de su alcance. `tests/test_bundle.py` lo verifica.
+  - Las tareas corren sobre serverless (`environment_version` 2, Python 3.11) con `requirements.txt`.
+  - Tiene una corrida a la vez, un límite de 2 horas y la programación en pausa (lunes a las 7:00, hora de Ciudad de México).
+  - `bundle validate -t prod` pasa sin desplegar.
+- **Protección de `predicciones`, antes del primer deploy.**
+  - Se respaldó la corrida del 2026-10-28 16:28:09 en `workspace.tesis_dev.predicciones_respaldo_20261028`: 7.424 filas, idénticas a las originales.
+  - `predicciones` quedó con `delta.appendOnly = true`.
+- **Corrida en dev:** 44 minutos, todas las tareas en verde. Train tardó 38 minutos.
+  - Las métricas son idénticas a las de la fase 4.
+  - `lightgbm_tweedie_211` sigue de champion, reentrenado como versión 3.
+  - Predict agregó la corrida 2026-10-28 17:47:13 con la versión 3.
+- **Verificación.**
+  - El historial de `predicciones` solo muestra la creación, el cambio de propiedad y un `WRITE` en modo `Append`.
+  - La corrida de las 16:28:09 sigue con 7.424 filas y coincide fila por fila con el respaldo.
+  - La versión 3 pronostica lo mismo que la 2 (las dos suman lo mismo en las 13 semanas): con los mismos datos y semillas, el reentrenamiento es determinista.
 
 ---
 

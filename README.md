@@ -19,4 +19,18 @@ make test    # pytest
 
 `lint` y `test` reconstruyen la imagen si cambiaron los requirements y montan el repo en `/app`, así que los cambios de código no requieren rebuild.
 
+## Databricks
+
+El job `demanda_pipeline` (ingest → features → train → predict → export) se define en [databricks.yml](databricks.yml) como Asset Bundle, con los targets `dev` (schema `tesis_dev`, por defecto) y `prod` (schema `tesis`). La conexión sale del perfil de `databricks configure`.
+
+```
+databricks bundle validate -t dev
+databricks bundle deploy -t dev
+databricks bundle run -t dev demanda_pipeline
+```
+
+El bundle solo administra el job y los archivos que sube al workspace: las tablas, los volúmenes y el modelo quedan fuera de su alcance.
+
+## Certificado local
+
 Si la red inspecciona el tráfico HTTPS, pon el certificado en `.certs/ca_bundle.pem` (ignorado por git). El Makefile lo pasa como secreto de BuildKit solo si existe, pip lo usa durante la instalación y no queda guardado en la imagen. En CI no se usa.
