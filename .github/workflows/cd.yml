@@ -1,0 +1,94 @@
+# CD: después de cada merge a main despliega el bundle en prod, y corre el job solo si se pide a mano.
+#
+# - Corre en push a main, solo si cambia algo que va al job, y con workflow_dispatch. Nunca en un pull request.
+# - El job usa el environment prod: GitHub pide aprobación antes de empezar y solo acepta la rama main.
+# - Desplegar no gasta cómputo: sube el código y la definición del job, no corre nada ni toca tablas. Correr el job
+#   (unos 45 min de cuota) solo pasa con workflow_dispatch y la casilla correr.
+# - Todo va con -t prod, el target del schema tesis: el CD nunca toca el schema de dev.
+#
+# El repo es público, así que:
+# - El host y el token llegan solo a los pasos que los usan. GitHub oculta sus valores en el log; el usuario de
+#   Databricks (un correo) se oculta a mano antes de cualquier comando del bundle.
+# - La salida de las tareas no va al log, porque trae piezas: solo el progreso y, si falla, el error.
+# - Las acciones van fijadas por commit, no por etiqueta.
+name: CD
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/**
+      - databricks.yml
+      - requirements.txt
+      - .github/workflows/cd.yml
+  workflow_dispatch:
+    inputs:
+      correr:
+        description: Correr el job demanda_pipeline en prod después de desplegar (unos 45 min de cuota)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# un despliegue a la vez, y el que llega espera sin cancelar al que está en curso: así nunca se cambia el código de
+# un job a mitad de corrida
+concurrency:
+  group: cd-prod
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash  # con -o pipefail: si falla un comando de una tubería, falla el paso
+
+jobs:
+  desplegar:
+    # workflow_dispatch deja elegir la rama: solo main despliega (el environment prod también lo exige)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod
+    # el job de Databricks tiene un límite de 2 horas; el resto es margen para el despliegue
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: databricks/setup-cli@8de769ec2543ee05e456ee2121350efc7efc4bda  # v1.22.1
+        with:
+          version: 1.22.1  # la misma versión que en local
+
+      # deploy imprime la ruta del bundle, que lleva el usuario de Databricks (un correo): se marca para que el log
+      # lo muestre como ***
+      - name: Ocultar el usuario de Databricks en el log
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          usuario=$(databricks current-user me --output json | python3 -c 'import json, sys; print(json.load(sys.stdin)["userName"])')
+          test -n "$usuario"
+          echo "::add-mask::$usuario"
+
+      - name: Validar el bundle de prod
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle validate -t prod
+
+      # Sube el código y la definición del job; la programación sigue en pausa. Falla si el job está corriendo, aunque
+      # lo hayan lanzado fuera de GitHub.
+      - name: Desplegar en prod
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle deploy -t prod --fail-on-active-runs
+
+      # Espera a que termine y falla si falla el job. Al terminar bien, la CLI imprime en stdout lo que imprimió cada
+      # tarea (métricas y pronóstico en piezas), así que stdout se descarta. El progreso y el error de una tarea que
+      # falle van por stderr y sí quedan en el log.
+      - name: Correr el job en prod
+        if: inputs.correr
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle run -t prod demanda_pipeline > /dev/null

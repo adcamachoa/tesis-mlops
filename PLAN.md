@@ -327,13 +327,49 @@ Agrega también workflow_dispatch para poder lanzarlo a mano.
 Propón el plan primero.
 ```
 
+Ajuste al prompt (28-oct-2026): el merge despliega, pero no corre el job. Correr el job completo gasta unos 45 minutos de cuota, así que solo corre cuando se pide a mano.
+
 Manual:
-- [ ] Crear el schema `workspace.tesis` con su Volume y parquet si no lo hiciste
-- [ ] Hacer merge del PR y verificar que el job corre en prod
+- [x] Crear el schema `workspace.tesis` con su Volume y parquet si no lo hiciste (fase 2)
+- [ ] En GitHub, **antes del merge**: Settings → Environments → New environment `prod`
+  - Required reviewers: tu usuario, con "Prevent self-review" sin marcar.
+  - Deployment branches: solo `main`.
+  - Si no existe al hacer el merge, GitHub lo crea sin reglas y despliega sin pedir aprobación.
+- [ ] Hacer merge del PR y aprobar el despliegue
+- [ ] Primera corrida en prod: `gh workflow run cd.yml --ref main -f correr=true`, y aprobarla
 
 Terminado cuando:
-- [ ] Merge a main despliega y ejecuta el job en prod automáticamente
+- [ ] El merge a main despliega en prod después de la aprobación, sin correr el job
+- [ ] La corrida manual termina en verde en prod
+- [ ] `workspace.tesis_dev.predicciones` sigue igual: mismo historial y la corrida del 2026-10-28 16:28:09 intacta
 - [ ] Commit `fase 8: CD`
+
+Diseño:
+- **Cuándo corre.** `.github/workflows/cd.yml` corre en push a main y con `workflow_dispatch`, nunca en un PR.
+  - En push, solo si cambia algo que va al job: `src/`, `databricks.yml`, `requirements.txt` o el propio `cd.yml`.
+- **Qué hace.** Es un solo job con el environment `prod`, que corre solo desde main.
+  - Siempre hace `bundle validate` y `bundle deploy` con `-t prod`. El despliegue solo sube el código y la definición del job; la programación sigue en pausa.
+  - Corre el job (`bundle run -t prod demanda_pipeline`) solo con `workflow_dispatch` y la casilla `correr`. Espera a que termine y falla si falla el job.
+  - Una aprobación cubre el despliegue y la corrida.
+- **Nunca toca `tesis_dev`.**
+  - Todo va con `-t prod`, sin `--var`: el schema sale del target prod, que es `tesis`.
+  - El modelo, el experimento (`/Shared/demanda_tesis`), las tablas y `results.json` quedan en `tesis`.
+  - El despliegue de prod tiene su propia carpeta en el workspace, separada de la de dev.
+- **Un despliegue a la vez.**
+  - El que llega espera sin cancelar al que está en curso.
+  - `deploy --fail-on-active-runs` falla si el job está corriendo, aunque lo hayan lanzado fuera de GitHub.
+  - Así nunca se cambia el código a mitad de una corrida.
+- **Log público sin piezas.**
+  - Al terminar, `bundle run` imprime en stdout lo que imprimió cada tarea: métricas como MAE y RMSE en piezas, y el pronóstico total.
+  - Por eso stdout se descarta. El progreso y el error de una tarea que falle van por stderr y sí quedan en el log.
+  - El usuario de Databricks se oculta antes del despliegue, porque `deploy` imprime la ruta con el correo.
+- **`predicciones` de solo agregar desde la primera corrida.** `predict.py` activa `delta.appendOnly` si la tabla no la tiene.
+  - En prod lo hace al crearla.
+  - En `tesis_dev`, que ya la tiene, solo lee la propiedad.
+- **Pruebas.** `tests/test_workflows.py` revisa `ci.yml` y `cd.yml`:
+  - que no haya `pull_request_target` y que las acciones vayan fijadas por commit;
+  - que los secretos estén solo en el env de los pasos, y la máscara del usuario antes del bundle;
+  - en el CD: solo main, solo `-t prod`, nada de `tesis_dev`, y la corrida solo con la casilla y sin su salida.
 
 ---
 

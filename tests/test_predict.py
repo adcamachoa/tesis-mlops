@@ -1,5 +1,5 @@
-"""Pruebas de src/predict.py: la tabla predicciones, el reparto en ventanas, el control de fuga y el modelo guardado
-con MLflow de punta a punta."""
+"""Pruebas de src/predict.py: la tabla predicciones, el reparto en ventanas, el control de fuga, el modelo guardado
+con MLflow de punta a punta y la protección de solo agregar."""
 from pathlib import Path
 
 import mlflow
@@ -9,7 +9,7 @@ import pytest
 
 from common import backtest, metrics, modelos
 from common.modelos import LIGHTGBM_1, LightGBMTweedie, ModeloDemanda, a_entrada, categorias
-from predict import COLUMNAS, revisar_entrenamiento, tabla_predicciones
+from predict import COLUMNAS, proteger_solo_agregar, revisar_entrenamiento, tabla_predicciones
 
 FECHA = pd.Timestamp("2026-05-20 08:30:00")
 
@@ -95,3 +95,28 @@ def test_se_detiene_si_el_modelo_conoce_semanas_posteriores_al_origen(capsys):
     assert "aviso" in capsys.readouterr().out
     with pytest.raises(ValueError, match="posterior al origen"):
         revisar_entrenamiento(origen + pd.Timedelta(weeks=1), origen)
+
+
+class SparkFalso:
+    """Lo mínimo de SparkSession para proteger_solo_agregar: responde SHOW TBLPROPERTIES con `propiedades` y anota
+    cada sentencia."""
+
+    def __init__(self, propiedades: dict[str, str]):
+        self.propiedades, self.sentencias = propiedades, []
+
+    def sql(self, sentencia: str):
+        self.sentencias.append(sentencia)
+        filas = [{"key": k, "value": v} for k, v in self.propiedades.items()]
+        return type("Resultado", (), {"collect": lambda _: filas})()
+
+
+def test_la_tabla_nueva_queda_de_solo_agregar_y_la_protegida_no_cambia():
+    nueva = SparkFalso({"delta.minReaderVersion": "1"})
+    proteger_solo_agregar(nueva, "workspace.tesis.predicciones")
+    assert nueva.sentencias == [
+        "SHOW TBLPROPERTIES workspace.tesis.predicciones",
+        "ALTER TABLE workspace.tesis.predicciones SET TBLPROPERTIES ('delta.appendOnly' = 'true')",
+    ]
+    protegida = SparkFalso({"delta.appendOnly": "true"})
+    proteger_solo_agregar(protegida, "workspace.tesis_dev.predicciones")
+    assert protegida.sentencias == ["SHOW TBLPROPERTIES workspace.tesis_dev.predicciones"]
