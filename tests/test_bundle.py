@@ -76,8 +76,8 @@ def test_reentrena_solo_si_la_condicion_lo_pide(tareas):
         "right": "true",
     }
     orden = list(TAREAS)
-    # el desempeño se mide antes de la condición, así que una ventana que cierra esta semana puede adelantar el
-    # reentrenamiento; el drift de datos se revisa antes, y un extremo detiene el job sin llegar a la condición
+    # monitoreo_desempeno publica la decisión que lee la condición; el drift de datos se revisa antes, y un extremo
+    # detiene el job sin llegar a la condición
     assert orden.index("monitoreo_datos") < orden.index("monitoreo_desempeno") < orden.index("toca_reentrenar")
 
 

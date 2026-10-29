@@ -28,7 +28,7 @@ El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer e
 - **Local:** en `data/`, que no se versiona.
 - **En Databricks:** en `/Volumes/workspace/<schema>/raw/`, con `<schema>` = `tesis_dev` o `tesis`.
 - **Corte:** datos hasta el domingo 18-oct-2026 (`data/_extraccion.json`). Los volúmenes son reales; lo anonimizado son los identificadores.
-- **Carga semanal en prod.** Cada lunes, antes de las 9:00 de Bogotá, se suben al Volume de prod los 5 parquet con corte al domingo.
+- **Carga semanal en prod.** Cada lunes, entre las 6:45 y las 9:00 de Bogotá, se exportan y suben al Volume de prod los 5 parquet con corte al domingo, con un solo comando. BigQuery se actualiza a las 6:00 y el catálogo a las 6:30.
   - Vienen de una exportación nueva que reutiliza la llave: los códigos existentes no cambian y solo se agregan los SKU nuevos.
   - `local` y `tesis_dev` se quedan con el corte del 18-oct.
 
@@ -64,7 +64,7 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - Venta semanal, de lunes a domingo.
   - No se pronostica por SKU: solo ~17 % de la venta está en SKU pronosticables. La curva de tallas y colores se aplica después, de arriba hacia abajo.
 - **Horizonte y formulación.**
-  - Horizonte de 13 semanas, con un pronóstico nuevo cada 4 semanas, o antes si una alerta de desempeño lo adelanta. Cada semana se actualiza la venta real publicada (ver "Cadencia").
+  - Horizonte de 13 semanas, con un pronóstico nuevo cada 4 semanas. Cada semana se actualiza la venta real publicada y se mide cada ventana que cerró (ver "Cadencia").
   - Pronóstico directo: una fila por serie × semana de origen × horizonte, y el horizonte es una variable.
   - Las variables solo usan información hasta el cierre del origen.
 - **Modelo.**
@@ -112,9 +112,12 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - `ingest` y `monitoreo_datos` llevan `disable_auto_optimization: true`. Serverless reintenta una tarea que falla, y sus fallas son detenciones a propósito: el freno se repetía, y un drift extremo escribiría sus revisiones dos veces.
 - **Cuándo toca reentrenar.** Lo decide `monitoreo_desempeno` y lo publica como task value booleano `reentrenar`.
   - Cuando el origen queda 4 semanas o más después del último origen de `predicciones`. Desde el 12-oct-2026 da los orígenes 9-nov, 7-dic y 4-ene, con corridas los lunes 16-nov, 14-dic y 11-ene.
-  - O antes, si alguna medición con alerta cerró después del `datos_hasta` del último pronóstico, es decir, si trae información que el último entrenamiento no conocía.
-    - Una alerta que ya conocía no vuelve a disparar, así que no reentrena cada semana mientras no cierre otra ventana.
-    - Después de un reentrenamiento adelantado, las 4 semanas se cuentan desde ese origen.
+  - O a mano, con `reentrenar=si`.
+- **Una alerta de desempeño no adelanta el reentrenamiento** (decisión del 29-oct-2026). Queda en la tabla `monitoreo_desempeno` y en el log como señal para revisar el modelo. La evidencia:
+  - **Cada medición cae 1 semana después de un reentrenamiento programado.** Con orígenes cada 4 semanas y ventanas de 31, 30 y 30 días, el mes 1 se mide 6 semanas después de su origen, el mes 2 a las 10 y el total a las 14. Adelantar solo le agregaría 1 semana de datos al modelo recién entrenado.
+  - **En la demostración no bajó el error.** Con la regla anterior (reentrenar si una alerta cerraba después del `datos_hasta` del último pronóstico) hubo 2 disparos, en dic-2025 a jul-2026. En sus 3 semanas vigentes, el WAPE tipo bajó 1,0 y 3,4 puntos, el WAPE total no cambió y el sesgo empeoró 1,9 y 7,7 puntos.
+  - **Cada disparo cuesta unos 36 minutos de cuota**, lo que tarda train.
+  - `scripts/simular_monitoreo.py` conserva la regla descartada (`alerta_posterior`) para reproducir esta evidencia.
 - **Freno.** `ingest` se detiene antes de leer los datos completos si los parquet no traen un domingo nuevo.
   - Cuenta el último domingo completo de la venta y del stock, el que llegue menos, contra el `real_hasta` del último `results.json` exportado.
   - Se compara con el último export: una corrida que falló después de la ingesta no lo actualizó, así que repetirla pasa el freno.
@@ -225,7 +228,8 @@ Los umbrales se fijaron el 28-oct-2026, antes de ver resultados en vivo, con la 
   - **Revisión manual** si la misma medición tiene alerta en el origen y en el origen anterior medido. De cada origen cuenta su última corrida.
     - Se compara la misma medición y no dos seguidas cualquiera: el mes 1 y el mes 2 de un pronóstico vienen del mismo modelo y el mismo origen, así que un solo pronóstico malo pediría revisión.
     - Si el modelo está igual de bien que en el backtest, una alerta de mes tiene probabilidad de cerca de 1/9 (quedar arriba del peor de 8 orígenes), y dos seguidas, de cerca de 1/81.
-  - Las alertas no detienen el job, pero adelantan el reentrenamiento (ver "Cadencia").
+  - **Las alertas no detienen el job ni adelantan el reentrenamiento.** Quedan en la tabla y en el log como señal para revisar el modelo. La decisión y su evidencia están en "Cadencia".
+  - **En la demostración** (`make simular-monitoreo`, 8 orígenes de dic-2025 a jul-2026), la alerta llegó 4 a 8 semanas antes que con las tres ventanas juntas, y la primera revisión manual 4 semanas antes. El valor de medir por ventana está en saber antes que el modelo dejó de acertar. El detalle está en la fase 9b de PLAN.md.
 - **Sin reentrenamiento por drift de datos.** Un drift extremo de datos detiene el job, no reentrena.
 - **Las tablas de monitoreo no guardan piezas,** ni el log las muestra: solo PSI, proporciones, fechas y nombres de variables.
 

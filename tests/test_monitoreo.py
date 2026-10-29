@@ -1,4 +1,7 @@
-"""Pruebas de common.monitoreo: PSI, nulos, cobertura, corte del stock, detención y desempeño contra el rango."""
+"""Pruebas de common.monitoreo: PSI, nulos, cobertura, corte del stock, detención, desempeño contra el rango y cuándo
+reentrena."""
+import inspect
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -327,6 +330,26 @@ def test_cada_ventana_se_mide_en_la_corrida_siguiente_a_su_cierre():
         ("2026-11-09", "mes_1"), ("2026-11-09", "mes_2"), ("2026-12-07", "mes_1")}
 
 
+def test_la_corrida_que_hace_cada_medicion():
+    """El lunes siguiente al domingo de la semana en que cierra la ventana, que es la misma fecha en que por_medir la
+    deja pasar."""
+    origenes = pd.to_datetime(["2026-10-12", "2026-11-09", "2026-12-07"])
+    esperadas = {
+        ("2026-10-12", "mes_1"): "2026-11-23", ("2026-10-12", "mes_2"): "2026-12-21",
+        ("2026-10-12", "total"): "2027-01-18", ("2026-11-09", "mes_1"): "2026-12-21",
+        ("2026-11-09", "mes_2"): "2027-01-18", ("2026-12-07", "mes_1"): "2027-01-18",
+    }
+    for (origen, medicion), lunes in esperadas.items():
+        assert monitoreo.corrida_de_medicion(pd.Timestamp(origen), medicion) == pd.Timestamp(lunes)
+    # cuadra con por_medir: el domingo anterior todavía no la mide, el lunes sí
+    corridas = pd.DataFrame({"fecha_corrida": origenes + pd.Timedelta(days=8), "origen": origenes})
+    for o in origenes:
+        for m in monitoreo.MEDICIONES:
+            lunes = monitoreo.corrida_de_medicion(o, m)
+            assert (f"{o.date()}", m) in _medido_en(corridas, f"{(lunes - pd.Timedelta(days=1)).date()}")
+            assert (f"{o.date()}", m) not in _medido_en(corridas, f"{(lunes - pd.Timedelta(days=8)).date()}")
+
+
 def test_lo_ya_medido_no_se_vuelve_a_medir():
     corridas = pd.DataFrame({"fecha_corrida": pd.to_datetime(["2026-10-28 16:28", "2026-10-28 17:47"]),
                              "origen": pd.to_datetime(["2026-10-12", "2026-10-12"])})
@@ -338,32 +361,35 @@ def test_lo_ya_medido_no_se_vuelve_a_medir():
     assert set(cerradas["cierre"].dt.date.astype(str)) == {"2026-11-18", "2026-12-18"}
 
 
-def test_reentrena_cada_4_semanas():
-    ultimo, vacio = pd.Timestamp("2026-10-12"), _medidas([], [], [])
-    decisiones = {f"{o.date()}": monitoreo.decidir_reentrenamiento(o, ultimo, vacio)[0]
+def test_reentrena_cada_4_semanas_o_a_mano():
+    ultimo = pd.Timestamp("2026-10-12")
+    decisiones = {f"{o.date()}": monitoreo.decidir_reentrenamiento(o, ultimo)[0]
                   for o in pd.date_range("2026-10-19", "2026-11-09", freq="7D")}
     assert decisiones == {"2026-10-19": False, "2026-10-26": False, "2026-11-02": False, "2026-11-09": True}
-    assert monitoreo.decidir_reentrenamiento(ultimo, None, vacio)[0]  # todavía no hay ningún pronóstico
-    assert monitoreo.decidir_reentrenamiento(ultimo, ultimo, vacio, forzado=True) == (True, "reentrenar=si")
+    assert monitoreo.decidir_reentrenamiento(ultimo, None)[0]  # todavía no hay ningún pronóstico
+    assert monitoreo.decidir_reentrenamiento(ultimo, ultimo, forzado=True) == (True, "reentrenar=si")
 
 
-def test_una_alerta_nueva_adelanta_el_reentrenamiento_una_sola_vez():
-    # el mes 1 del 12-oct cerró el 18-nov con alerta, y el último pronóstico (9-nov) conocía hasta el 15-nov
-    alerta = _medidas(["2026-10-12"], ["mes_1"], [True], cierres=["2026-11-18"])
-    reentrena, motivo = monitoreo.decidir_reentrenamiento(
-        pd.Timestamp("2026-11-16"), pd.Timestamp("2026-11-09"), alerta)
-    assert reentrena and "mes_1 del origen 2026-10-12" in motivo
-    # la semana siguiente, el pronóstico del 16-nov ya conocía esa ventana: no vuelve a reentrenar por ella
-    assert not monitoreo.decidir_reentrenamiento(pd.Timestamp("2026-11-23"), pd.Timestamp("2026-11-16"), alerta)[0]
-    # sin alerta, la ventana nueva no adelanta nada
-    en_rango = alerta.assign(alerta=False)
-    assert not monitoreo.decidir_reentrenamiento(pd.Timestamp("2026-11-16"), pd.Timestamp("2026-11-09"), en_rango)[0]
+def test_una_alerta_no_adelanta_el_reentrenamiento():
+    """Decisión del 29-oct-2026: cada medición cae 1 semana después de un reentrenamiento programado, así que adelantar
+    solo agregaría 1 semana de datos. La decisión no depende de las mediciones."""
+    assert list(inspect.signature(monitoreo.decidir_reentrenamiento).parameters) == [
+        "origen", "ultimo_pronostico", "forzado"]
+    # el mes 1 del 12-oct cerró el 18-nov con alerta y se mide el 23-nov, con origen 16-nov: 1 semana después del
+    # reentrenamiento programado del 9-nov, que no se adelanta ni se repite
+    reentrena, motivo = monitoreo.decidir_reentrenamiento(pd.Timestamp("2026-11-16"), pd.Timestamp("2026-11-09"))
+    assert not reentrena and motivo == "van 1 semanas desde el origen 2026-11-09; toca a las 4"
 
 
-def test_la_alerta_de_una_corrida_reemplazada_no_cuenta():
-    medidas = _medidas(["2026-10-12", "2026-10-12"], "mes_1", [True, False],
-                       corridas=["2026-10-28 16:28", "2026-10-28 17:47"], cierres=["2026-11-18", "2026-11-18"])
-    assert not monitoreo.decidir_reentrenamiento(pd.Timestamp("2026-11-16"), pd.Timestamp("2026-11-09"), medidas)[0]
+def test_cada_medicion_cae_una_semana_despues_de_un_reentrenamiento_programado():
+    """Con orígenes cada 4 semanas, el lunes de cada medición es el siguiente a una corrida de la rejilla: mes 1 a las
+    6 semanas del origen, mes 2 a las 10 y total a las 14."""
+    origen = pd.Timestamp("2026-10-12")
+    corridas_de_la_rejilla = {origen + pd.Timedelta(weeks=1 + 4 * k) for k in range(5)}
+    for medicion, semanas in (("mes_1", 6), ("mes_2", 10), ("total", 14)):
+        lunes = monitoreo.corrida_de_medicion(origen, medicion)
+        assert lunes == origen + pd.Timedelta(weeks=semanas)
+        assert lunes - pd.Timedelta(weeks=1) in corridas_de_la_rejilla
 
 
 def test_el_parametro_reentrenar():
