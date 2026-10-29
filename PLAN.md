@@ -625,7 +625,7 @@ Manual:
 - [ ] En Settings → Environments, revisar que `github-pages` solo acepte `main`
 - [ ] Revisar la prueba en dev antes del merge
 - [ ] Hacer merge del PR y aprobar el despliegue en prod. El merge solo despliega: `pages.yml` no publica.
-- [ ] Exportar en prod: `gh workflow run cd.yml --ref main -f solo_export=true`, y aprobarlo. Al terminar en verde, `pages.yml` publica solo.
+- [ ] Exportar en prod: `gh workflow run cd.yml --ref main -f accion=solo_export`, y aprobarlo. Al terminar en verde, `pages.yml` publica solo.
 - [ ] Comprobar que `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real y que pasa la validación
 
 Prompt para Claude Code:
@@ -654,11 +654,19 @@ Rama fase-9-publicacion y PR. Propón el plan primero.
 ```
 
 Terminado cuando:
-- [ ] `make lint` y `make test` pasan, con las pruebas nuevas
-- [ ] En dev, el export deja `output/datos/` con el manifest y un `results.json` por origen, y pasa la validación
-- [ ] El CD con `solo_export` termina en verde en prod y `pages.yml` publica
+- [x] `make lint` y `make test` pasan, con las pruebas nuevas
+- [x] En dev, el export deja `output/datos/` con el manifest y un `results.json` por origen, y pasa la validación
+- [ ] El CD con `accion=solo_export` termina en verde en prod y `pages.yml` publica
 - [ ] `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real
-- [ ] Commit `fase 9: datos públicos para la página`, por PR
+- [x] Commit `fase 9: datos públicos para la página`, por PR
+
+Ajustes aprobados (28-oct-2026):
+- En el CD, la casilla `correr` y la nueva `solo_export` quedan en un solo input de lista, `accion`, así que no pueden chocar.
+- `pages.yml` descarga de Databricks antes de instalar nada de PyPI, y valida después, sin secretos.
+- `results_schema` no cambia los nombres que importa `tesis-mlops-web` (`validar` con un argumento, `VERSION`, `ESCALA` y `BASE_INDICE`). Agrega:
+  - **Fechas que existan**, también en `results.json`. La web ya rechaza fechas como "2026-13-01".
+  - **`ErrorEsquema` con el nombre del archivo,** como argumento opcional.
+  - **El error de la venta en piezas no muestra el promedio,** porque sería la venta semanal del total y el error puede llegar a un log público.
 
 Diseño:
 - **Archivos.** `export_results.py` escribe en `/Volumes/workspace/<schema>/raw/output/`:
@@ -684,20 +692,22 @@ Diseño:
   - cada `results.json` de la lista cumple `validar` y trae en `corrida` el mismo `origen` y `fecha_prediccion` que su entrada.
   - Las pruebas rechazan los mismos casos que `pruebas/datos.test.js` de la web: sin pronósticos, ruta con `..`, absoluta o a otro sitio, `id` con espacios, fecha que no existe, origen o `id` repetido, y `version_manifest` 2 o ausente.
   - Si la web cambia sus reglas, se cambian aquí también.
-- **Casilla `solo_export` en el CD.**
-  - Con `workflow_dispatch`, despliega como siempre y corre solo la tarea export en prod (`bundle run -t prod demanda_pipeline --only export`). Son unos 3 minutos en vez de 45, con la misma aprobación del environment `prod`.
+- **Acción `solo_export` en el CD.**
+  - La casilla `correr` pasa a ser un input de lista, `accion`: `desplegar` (por defecto), `correr` o `solo_export`. Como se elige una sola, no hay choque que revisar. La corrida completa ahora se pide con `-f accion=correr`.
+  - Con `solo_export`, despliega como siempre y corre solo la tarea export en prod (`bundle run -t prod demanda_pipeline --only export`). Son unos 3 minutos en vez de 45, con la misma aprobación del environment `prod`.
   - Descarta stdout, igual que `correr`.
-  - Con `correr` y `solo_export` marcadas a la vez, falla antes de desplegar.
   - Sirve para publicar ya el pronóstico del 12-oct-2026 sin esperar a enero, y para volver a exportar si cambia el formato.
 - **`pages.yml`.**
   - **Cuándo corre.** Con `workflow_run` del CD y con `workflow_dispatch`.
     - Con `workflow_run`, solo si el CD terminó en `success`, fue lanzado con `workflow_dispatch` y fue sobre `main`, desde este mismo repo. Los merges que solo despliegan no cambian datos, así que no publican.
+    - `workflow_run` no trae la acción elegida en el CD: uno lanzado a mano con `accion=desplegar` también publica, con los mismos datos. No hace daño.
     - Con `workflow_dispatch`, solo desde `main`.
     - Nunca `pull_request` ni `pull_request_target`.
   - **Job `descargar`**, el único con secretos, y solo en los pasos que los usan.
     - Oculta el usuario de Databricks con `::add-mask::`.
     - Descarga `/Volumes/workspace/tesis/raw/output/datos/` con `databricks fs cp -r`: siempre `tesis`, nunca `tesis_dev`.
-    - Valida con `results_schema` que el manifest y los archivos coincidan: cada entrada con su archivo y ningún archivo fuera del manifest. Si algo falla, no publica y lo que ya estaba en Pages queda igual.
+    - Después de descargar instala Python 3.11 y, de PyPI, solo pandas, numpy y jsonschema, con los rangos de `requirements.txt`. Así ningún paquete de PyPI está instalado mientras se usan los secretos.
+    - Valida sin secretos, con `python -m common.results_schema`, que el manifest y los archivos coincidan: cada entrada con su archivo y ningún archivo fuera del manifest. Si algo falla, no publica y lo que ya estaba en Pages queda igual.
     - Sube la carpeta como artefacto de Pages, con `datos/` en la raíz del sitio.
   - **Job `publicar`**, sin secretos: el único con `pages: write` e `id-token: write`, con el environment `github-pages`.
   - Una publicación a la vez. Cada una reemplaza el sitio completo, y como el export regenera todos los orígenes, no se pierde ninguno.
@@ -708,11 +718,26 @@ Diseño:
   - El manifest válido y cada caso que rechaza la web.
   - `tests/test_workflows.py`:
     - `pages.yml`: las condiciones del disparo, los secretos solo en `descargar` y en los pasos que los usan, la máscara antes de Databricks, solo `tesis`, y los permisos de escritura solo en `publicar`;
-    - `cd.yml`: `solo_export` con `--only export`, `-t prod` y sin su salida.
+    - `cd.yml`: `accion` con sus tres opciones, y `solo_export` con `--only export`, `-t prod` y sin su salida.
   - `tests/test_bundle.py` no cambia: el bundle sigue declarando solo el job.
 - **Prueba en dev.** `bundle deploy -t dev` y `bundle run -t dev demanda_pipeline --only export`, unos minutos de cuota.
   - Se descarga `output/datos/` de `tesis_dev` y se valida en local con la misma función. Debe traer el origen del 12-oct-2026 con la corrida de las 17:47:13, la última de ese origen.
   - `pages.yml` nunca lee dev.
+
+Resultado (28-oct-2026):
+- **Pruebas.** `make lint` pasa y `make test` da 144 pruebas en verde, con las nuevas del export, del manifest y de los workflows.
+  - Como control cruzado, el ejemplo sintético de `tesis-mlops-web` (`docs/datos/ejemplo/`, dos orígenes) pasa `python -m common.results_schema`, así que las reglas de los dos repos coinciden.
+- **Dev.**
+  - `bundle deploy -t dev` subió 12 archivos sin cambiar el job.
+  - `bundle run -t dev demanda_pipeline --only export` terminó en verde en 1,5 minutos.
+- **`output/datos/` de `tesis_dev`,** descargado con el mismo `databricks fs cp -r` de `pages.yml`. Copia el contenido de `datos/` en la carpeta de destino, y el log solo muestra rutas.
+  - Trae `manifest.json` y `2026-10-12/results.json`, y pasa la validación.
+  - El origen es el 12-oct-2026, con la corrida de las 17:47:13, la última de ese origen, y la versión 3.
+  - Las métricas son las del train que registró la versión 3, el de las 17:43:07: backtest de 8 orígenes, del 29-dic-2025 al 13-jul-2026.
+  - `lightgbm_tweedie_211` es el champion y el mejor, con WAPE tipo × mes de 43,8 %, igual que en la fase 6.
+  - Trae 24 series (el total, 3 submarcas y 20 series), y la venta real del total promedia 100,0.
+- **Tablas.** El export solo lee `predicciones`, `metricas_modelos` y `panel_semanal`, y busca las versiones en Unity Catalog: no escribe en ninguna tabla.
+- **Horas en UTC.** `generado` y `fecha_prediccion` van en UTC, la hora de Databricks serverless, como `fecha_corrida` en las tablas.
 
 Fuera de esta fase:
 - **El PR de `docs/config.js` en `tesis-mlops-web`**: `url` a `https://adcamachoa.github.io/tesis-mlops/datos/` y `sinteticos: false`, y activar su Pages.

@@ -3,7 +3,7 @@
 Repositorio productivo de la tesis de maestría. Es un pipeline MLOps para pronosticar la demanda semanal de una marca de moda infantil que vende en e-commerce y marketplaces en México:
 - Datos y jobs en Databricks Free Edition.
 - CI/CD en GitHub Actions.
-- Página de resultados en GitHub Pages.
+- Datos públicos de la página en GitHub Pages (`adcamachoa.github.io/tesis-mlops/datos/`). La página está en el repo `tesis-mlops-web`.
 
 El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer el plan antes de editar.
 
@@ -21,6 +21,7 @@ El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer e
   - Los secretos solo van en los pasos que los usan, y nunca en jobs que ejecuten código de un PR de fork.
   - El usuario de Databricks se oculta en el log con `::add-mask::`, y las acciones van fijadas por commit.
 - **El bundle solo declara el job `demanda_pipeline`.** No agregues a `databricks.yml` schemas, volúmenes, tablas ni modelos como recursos, porque `deploy` y `destroy` podrían cambiarlos o borrarlos. `tests/test_bundle.py` lo verifica.
+- **No se borran versiones del modelo en Unity Catalog.** El export las necesita para regenerar los orígenes: liga cada pronóstico con su train por el run de su versión. Sin la versión, el export falla y no publica nada.
 
 ## Datos
 
@@ -105,10 +106,22 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - Cada corrida se agrega a la tabla con `fecha_corrida`, `origen`, `modelo` y `modelo_version`.
   - **Solo crece:** tiene `delta.appendOnly = true`, así que Delta rechaza reemplazarla, borrar filas o editarlas. Para borrar una corrida de prueba hay que quitar la propiedad a propósito.
   - La corrida del 2026-10-28 16:28:09 en `tesis_dev`, que se mide en enero de 2027, tiene además un respaldo en `workspace.tesis_dev.predicciones_respaldo_20261028`, también con `appendOnly`.
-- **`results.json`.** Su esquema está en `src/common/results_schema.py`.
-  - Usa solo la última corrida del origen más reciente, y la última corrida de `metricas_modelos`.
-  - **La página es pública: nunca lleva piezas.** La venta real y el pronóstico van como índice, donde 100 = la venta semanal promedio del total en las 52 semanas mostradas. El factor es el mismo para todas las series, y el MAE y el RMSE se escalan con él.
+- **Datos de la página.** La tarea export escribe en `/Volumes/workspace/<schema>/raw/output/`:
+  - `datos/<origen>/results.json`: uno por origen de `predicciones`, con su última corrida. Su esquema está en `src/common/results_schema.py` (`version_esquema` 1).
+  - `datos/manifest.json`: una entrada por origen, en el formato 1 del README de `tesis-mlops-web`. `validar_manifest` sigue las reglas de `revisarManifest` de la web (`docs/js/datos.js`); si la web las cambia, se cambian aquí también.
+  - `results.json`: el mismo archivo del origen más reciente.
+  - En cada corrida vuelve a generar todos los orígenes desde las tablas. Valida todo en memoria antes de escribir: si algo falla, no escribe nada.
+- **Cada origen se arma solo con datos hasta su `datos_hasta`.**
+  - Venta real: las 52 semanas hasta el origen. Las posteriores no entran, tampoco en el factor del índice ni en la elección de las 20 series.
+  - Pronóstico: la última corrida de ese origen.
+  - Métricas: las de la corrida de `metricas_modelos` que registró la versión que pronosticó, cuyo `run_id_modelo` es el run de esa versión en Unity Catalog. Nunca las de un train posterior.
+  - Si un refresco corrige la venta de semanas pasadas, la venta real de un origen viejo cambia al regenerarlo. El pronóstico y las métricas no cambian.
+- **La página es pública: nunca lleva piezas.** La venta real y el pronóstico van como índice, donde 100 = la venta semanal promedio del total en las 52 semanas mostradas. El factor es el mismo para todas las series, y el MAE y el RMSE se escalan con él.
   - El índice va con 1 decimal. Con más decimales, cada pieza se vería como un escalón fijo y se podría reconstruir la escala.
+- **Publicación.** `pages.yml` descarga `output/datos/` de prod (siempre `tesis`), lo valida con `python -m common.results_schema` y lo publica en GitHub Pages.
+  - Corre cuando el CD lanzado a mano sobre main termina bien, y a mano desde main. Los merges solo despliegan, así que no publican.
+  - Para publicar sin correr el job completo: `gh workflow run cd.yml --ref main -f accion=solo_export` (unos 3 min de cuota).
+- **La web depende de estos nombres.** `herramientas/generar_ejemplo.py` de `tesis-mlops-web` importa de este repo `results_schema.validar(resultados)` (con un solo argumento), `results_schema.VERSION`, `ESCALA` y `BASE_INDICE`, `features.HORIZONTE`, `metrics.METRICAS` y `metrics.VENTANAS_DIAS`. No se cambian sus nombres ni la firma de `validar`.
 
 ## Monitoreo y drift
 
@@ -182,14 +195,13 @@ src/
   monitoreo_datos.py   drift de datos del origen → tabla monitoreo_datos; detiene el job si es extremo
   train.py             backtest, MLflow, registro del champion en Unity Catalog
   predict.py           pronóstico con el champion → tabla predicciones
-  export_results.py    results.json para la página
+  export_results.py    datos de la página: un results.json por origen y manifest.json
   monitoreo_desempeno.py  error en vivo contra el rango del backtest → tabla monitoreo_desempeno
   common/              funciones puras en pandas, con pruebas
     validation.py  features.py  metrics.py  backtest.py  modelos.py  results_schema.py  monitoreo.py
 scripts/               solo en local: simular_monitoreo.py (calibración y demostración del monitoreo)
-tests/                 pruebas (pytest) y tests/data/ (muestra.parquet, results.json de ejemplo)
-front/                 template.html y build.py → dist/index.html
+tests/                 pruebas (pytest) y tests/data/ (muestra.parquet)
 databricks.yml         Asset Bundle: job demanda_pipeline, targets dev y prod
-.github/workflows/     ci.yml, cd.yml, pages.yml
+.github/workflows/     ci.yml (PR), cd.yml (despliegue y corridas en prod), pages.yml (publica los datos)
 data/                  dataset local (no se versiona)
 ```
