@@ -453,6 +453,7 @@ Ajustes aprobados (28-oct-2026):
   - la cobertura de SKU con stock y de filas de venta;
   - el corte del stock.
 - La cobertura se compara contra la semana más baja de las 4 anteriores y no contra su promedio, porque el promedio queda inflado después de cada Hot Sale.
+- Se agregó la cobertura del mes, contra las semanas que ya revisó la corrida anterior: SKU con stock y venta entre salidas de stock. Cubre el caso en que todo el mes llega roto.
 - Los umbrales y su calibración están en "Monitoreo y drift" de CLAUDE.md.
 
 Diseño:
@@ -471,6 +472,7 @@ Diseño:
   - Umbrales: menos de 0,25 es estable; de 0,25 a 1,0 es aviso, que queda en la tabla y en el log; 1,0 o más es extremo. `tendencia` queda solo como dato.
   - **Nulos:** la parte de nulos del origen contra los últimos 13 orígenes. Da aviso si sube 10 puntos y es extremo si la variable llega 100 % nula y antes tenía datos.
   - **Cobertura:** SKU con stock al cierre y filas de venta de la semana del origen, contra la más baja de las 4 semanas anteriores. Da aviso en 0,75 y es extremo en 0,6.
+  - **Cobertura del mes:** SKU con stock y venta entre salidas de stock de cada semana nueva, contra las 4 semanas que revisó la corrida anterior, con los mismos umbrales.
   - **Corte del stock:** es extremo si el stock atrasa el origen una semana o más.
   - Con un extremo, la tarea escribe la tabla y después falla, así que el job se detiene antes de train.
   - Para seguir con un cambio extremo que se revisó y es legítimo, el job tiene el parámetro `aceptar_drift`, con la fecha del origen. Solo vale para ese origen y queda anotado en la tabla.
@@ -498,6 +500,8 @@ Diseño:
   - niveles, detención y `aceptar_drift` solo para su origen;
   - rango y alertas: el WAPE solo por arriba y el sesgo por los dos lados;
   - revisión con 2 seguidas, ventanas cerradas y log sin piezas;
+  - cobertura del mes: un mes entero a medias que la cobertura de la semana no ve, la corrida anterior en la primera corrida (el último origen de `predicciones`) y la venta sin verificar cuando faltan salidas de stock;
+  - `tests/test_monitoreo_spark.py`: las salidas de stock en Spark dan igual que en pandas;
   - `tests/test_bundle.py` con las 7 tareas.
 - **Demostración local** (`scripts/simular_monitoreo.py`, con `make simular-monitoreo`).
   - Usa los 8 orígenes del backtest de dev y prod (29-dic-2025 a 13-jul-2026) como 8 corridas mensuales en vivo, con el algoritmo del champion actual (`lightgbm_tweedie_211`) entrenado hasta cada origen.
@@ -514,7 +518,8 @@ Diseño:
   - Los 8 orígenes del rango nunca caen en la misma temporada que el pronóstico en vivo. El del 12-oct-2026, con Buen Fin y diciembre, se compara con orígenes de diciembre a julio.
   - **El rango de enero es poco exigente.** Sus 8 orígenes incluyen la alerta del 20-abr-2026 y la revisión manual del 18-may-2026, así que va de 30,2 % a 45,4 % en WAPE total y de −18,0 % a +33,1 % en sesgo.
     - Se deja así porque se fijó antes de ver la venta real.
-  - La cobertura compara la semana del origen con las 4 anteriores. Con el refresco mensual, si todo el mes llega roto, compara contra semanas igual de rotas y no lo ve. El PSI solo da aviso. Ver el pendiente de la cobertura del mes.
+  - La cobertura de la semana compara contra las 4 semanas anteriores, que con el refresco mensual también son nuevas. Un mes entero roto lo ve la cobertura del mes, que compara contra las semanas que ya revisó la corrida anterior.
+  - La cobertura del mes está calibrada con corridas cada 4, 5 o 13 semanas. Después de un hueco más largo, el bloque nuevo cruza más temporada y puede dar avisos falsos.
   - Con el stock atrasado, `aceptar_drift` solo repite el pronóstico desde el mismo origen. Ver el pendiente del modo sin stock.
 
 Resultado (28-oct-2026):
@@ -554,34 +559,32 @@ Resultado (28-oct-2026):
     - Todas quedaron estables: el PSI más alto fue 0,09, la cobertura de SKU con stock 1,14 y la de filas de venta 1,18, y el stock no atrasa el origen.
   - `monitoreo_desempeno` no encontró ventanas cerradas, así que no creó su tabla.
     - Leyó desde MLflow el rango de las corridas de las versiones 2 y 3: WAPE M1 de 23,8 % a 50,0 %, M2 de 30,2 % a 58,8 %, total de 30,2 % a 45,4 % y sesgo de −18,0 % a +33,1 %. Coincide con la simulación local.
-  - `predicciones` no se tocó: la corrida solo ejecutó las dos tareas nuevas, que solo la leen. No se consultó su historial.
+  - `predicciones` sigue intacta. La corrida solo ejecutó las dos tareas nuevas, que solo la leen, y la consulta de solo lectura de su historial lo confirma:
+    - sigue en la versión 2, con el último cambio a las 17:47:16 UTC (un `WRITE` en modo `Append`);
+    - `delta.appendOnly = true`;
+    - la corrida del 2026-10-28 16:28:09 tiene 7.424 filas, igual que la de las 17:47:13.
+- **Cobertura del mes** (aprobada el 28-oct-2026 e implementada en el mismo PR).
+  - **Problema.** Con el refresco mensual llegan 4 o 5 semanas nuevas a la vez. Si todas llegan rotas, la cobertura de la semana las compara entre sí y queda en 1.
+    - Simulado en 18 orígenes con la venta de todas las series × 0,5 en las últimas 4 o 5 semanas: el PSI más alto (`media_4` o `rezago_1`) tiene una mediana de 0,27. Da aviso en 9 de 18 y nunca llega a 1,0.
+  - **Solución.** Cada semana nueva se compara contra las 4 semanas que ya revisó la corrida anterior, hasta su origen, con los mismos umbrales: aviso en 0,75 y detención en 0,6.
+    - **SKU con stock del mes.**
+    - **Venta entre salidas de stock del mes.** El conteo de filas de venta no sirve para el mes:
+      - contra las semanas revisadas, la semana antes del Hot Sale cae sola a 0,50;
+      - contra el año anterior, a 0,16, porque el Hot Sale cambia de fecha.
+  - **Corrida anterior.** El último origen de `monitoreo_datos` cuya corrida no tuvo extremos o los aceptó, o el último de `predicciones`.
+    - La primera corrida con monitoreo, como la de enero en prod, usa las 4 semanas hasta el origen de la última corrida en `predicciones`, el 12-oct-2026.
+    - Si tampoco hay, las 4 semanas hasta el origen − 4 semanas.
+  - **En Spark.** `monitoreo_datos` calcula las salidas de stock de `stock_bronze`. Una prueba con Spark local verifica que dan igual que la función de pandas con la que se calibró.
+  - **Calibración** (`make calibrar-drift`): ninguna detención en la historia.
 
-Pendiente (propuesto, sin implementar): **cobertura del mes.**
-- **Problema.** Con el refresco mensual llegan 4 o 5 semanas nuevas a la vez. Si todas llegan rotas, la cobertura compara la semana del origen contra semanas igual de rotas y queda en 1.
-  - **Simulación** en 18 orígenes, con la venta de todas las series × f en las últimas 4 o 5 semanas.
-    - Con f = 0,5, el PSI más alto (`media_4` o `rezago_1`) tiene una mediana de 0,27: da aviso en 9 de los 18 orígenes y nunca llega a 1,0.
-    - Con f = 0,7, da aviso solo en 3 de 18.
-- **Propuesta.** Comparar cada semana nueva desde la corrida anterior contra las 4 semanas que esa corrida ya revisó, que terminan en su origen.
-  - El origen de la corrida anterior se lee de `monitoreo_datos`. Si no hay, se usa el origen − 4 semanas.
-  - Cuenta la semana nueva más baja contra la más baja de las revisadas, con los mismos umbrales: aviso en 0,75 y detención en 0,6.
-  - **SKU con stock del mes.** En la historia, lo normal nunca baja de 0,81: ningún aviso en 67 orígenes, ni con la corrida anterior 4 semanas antes ni con 5.
-    - Con el mes entero a la mitad, se detiene en 63 de 67 y da aviso en todos.
-  - **Venta contra salidas de stock del mes.** Por semana, las unidades vendidas entre las salidas de stock, que son la suma por SKU × día de lo que bajó el stock.
-    - Se usa esta razón porque el conteo de filas de venta no sirve aquí:
-      - Contra las semanas revisadas, la semana antes del Hot Sale cae sola a 0,50, igual que un mes a medias. Habría 5 detenciones falsas en 137 orígenes.
-      - Contra el año anterior es peor: el Hot Sale cambia de fecha y una semana normal cae a 0,16.
-    - Cruzar dos fuentes independientes resuelve eso: un evento mueve la venta y las salidas a la vez, pero una venta incompleta solo baja la venta.
-    - En la historia, la razón semanal va de 0,75 a 1,85, y la revisión nunca baja de 0,70: 1 o 2 avisos y ninguna detención en 68 orígenes.
-    - Detección:
+    | Revisión | Corrida anterior | Mínimo normal | Avisos | Mes entero a la mitad | Una semana a la mitad |
+    |---|---|---|---|---|---|
+    | SKU con stock | 4 / 5 / 13 semanas antes | 0,81 / 0,81 / 0,76 | 0 | se detiene en 64 de 69 | 62 de 69 |
+    | Venta entre salidas | 4 / 5 / 13 semanas antes | 0,70 / 0,70 / 0,70 | 1 / 2 / 6 | se detiene en 60 de 69 | 41 de 69 |
 
-      | Rotura | Detenciones | Avisos |
-      |---|---|---|
-      | Mes entero a la mitad | 59 de 68 | 68 de 68 |
-      | Mes entero al 70 % | 13 de 68 | 49 de 68 |
-      | Una semana a la mitad, a mitad de mes | 41 de 68 | 59 de 68 |
-  - Las dos revisiones semanales actuales se quedan igual, y la tabla solo guarda razones.
-  - `monitoreo_datos` agregaría en Spark las salidas de stock de unas 9 semanas de `stock_bronze`. La calibración pasaría a `make calibrar-drift`.
-- **Límite.** Está calibrada con corridas cada 4 o 5 semanas. Si una corrida llega después de un hueco más largo, el bloque nuevo cruza más temporada y puede dar avisos falsos.
+    - Con 13 semanas, como la corrida de enero en prod, el bloque nuevo cruza Buen Fin y diciembre, y aun así ningún origen normal se detiene.
+  - **Solo vale porque el stock viene de los movimientos del almacén, independiente de la venta.** Está documentado en CLAUDE.md.
+  - Sin salidas de stock en una semana nueva, venta entre salidas queda `sin datos`. El log dice que la venta del mes no se verificó, no se detiene el job y `aceptar_drift` no la vuelve estable.
 
 Pendiente (propuesto, sin implementar): **modo sin stock reciente.**
 - **Problema.** `features.py` corta en la fecha más temprana entre la venta y el stock. Si la venta llega a enero y el stock a octubre, el origen se queda en octubre: liberar el freno no produce un pronóstico nuevo.
@@ -589,8 +592,15 @@ Pendiente (propuesto, sin implementar): **modo sin stock reciente.**
   - Con `false`, features corta por la fecha de la venta. En las semanas posteriores al último día de stock, `stock_cierre`, `skus_con_stock`, `estilos_color_con_stock` y `disponibilidad` quedan nulos, no en 0, igual que antes de mayo de 2025.
   - El modelo ya conoce el stock nulo: lo tuvo en todo 2024 y hasta abril de 2025 al entrenar. Con stock nulo se apoya en la historia de la venta.
 - **Cómo se usa.** El job se detiene por el corte del stock y se corre con `exigir_stock=false` y `aceptar_drift=<origen de la venta>`.
-  - En esa corrida, `monitoreo_datos` marca extremos que el mismo `aceptar_drift` libera: el corte del stock, los nulos de `stock_cierre` y `disponibilidad` (100 % contra 0 %) y la cobertura de SKU con stock (0).
+  - En esa corrida, `monitoreo_datos` marca extremos que el mismo `aceptar_drift` libera:
+    - el corte del stock;
+    - los nulos de `stock_cierre` y `disponibilidad` (100 % contra 0 %);
+    - la cobertura de SKU con stock, de la semana y del mes (0).
   - Así, liberar el freno sí da un pronóstico nuevo desde el origen de la venta.
+  - **Venta entre salidas de stock** no se puede calcular en las semanas nuevas, porque no tienen stock.
+    - Queda `sin datos`, y el log dice que la venta del mes no se verificó.
+    - `aceptar_drift` no la marca como estable: el rastro dice que esa venta se usó sin revisar.
+    - Ya funciona así desde esta fase. Una prueba lo cubre.
 - **Rastro.**
   - `exigir_stock` queda como parámetro del run de MLflow y como columna nueva de `predicciones`. Agregar una columna está permitido con `appendOnly`.
   - `monitoreo_desempeno` mide esas corridas como cualquier otra.

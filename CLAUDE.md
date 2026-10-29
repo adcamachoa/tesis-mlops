@@ -122,13 +122,26 @@ Los umbrales se fijaron el 28-oct-2026, antes de ver resultados en vivo, con la 
     - El único origen que se habría detenido es el 24-feb-2025, con 1,72 en `disponibilidad`. Fue una semana después del inicio del stock, así que se comparó contra una sola semana.
     - Roturas simuladas: una semana sin venta da 5,5; el stock en cero, 8,6; la venta en docenas, de 1,5 a 2,4.
     - Una semana con las unidades dobladas da de 0,7 a 1,0: queda en aviso, y en detención solo si llega a 1,0.
-    - El stock de solo la mitad de los SKU da de 0,1 a 0,2, así que el PSI no lo ve. Lo detecta la cobertura de SKU con stock.
+    - El stock de solo la mitad de los SKU da de 0,1 a 0,2, así que el PSI no lo ve. Lo detectan las coberturas de SKU con stock.
   - **Nulos** de cada variable en el origen contra los últimos 13 orígenes de la ventana.
     - Aviso si la parte de nulos sube 10 puntos o más. El aumento más alto de la historia fue de +7,7 puntos.
     - Detención si la variable llega 100 % nula y en esos 13 orígenes tenía datos.
   - **Cobertura** de la semana del origen contra la semana más baja de las 4 anteriores: SKU con stock al cierre (de `panel_semanal`) y filas de venta, es decir, SKU × día con venta.
     - Aviso en 0,75 o menos y detención en 0,6 o menos.
     - Se compara con la semana más baja y no con el promedio. Después de un Hot Sale, contra el promedio, las filas de venta bajan hasta 0,25. Contra la más baja, el mínimo de la historia es 0,70 en filas de venta y 0,88 en SKU con stock.
+  - **Cobertura del mes.** Con el refresco mensual llegan 4 o 5 semanas a la vez. Si todas vienen rotas, la cobertura de la semana las compara entre sí y no lo ve; el PSI solo da aviso, con una mediana de 0,27 si todo el mes llega a la mitad.
+    - Por eso cada semana nueva se compara también contra las 4 semanas que ya revisó la corrida anterior, hasta su origen. Cuenta la semana nueva más baja contra la más baja de las revisadas.
+    - Aviso en 0,75 o menos y detención en 0,6 o menos, como en la semana.
+    - **Corrida anterior:** el último origen de `monitoreo_datos` cuya corrida no tuvo extremos o los aceptó, o el último origen de `predicciones`, porque una corrida que se detuvo no pronostica.
+      - En la primera corrida con monitoreo, como la de enero en prod, cuenta el último origen de `predicciones`. Si no hay ninguno, las 4 semanas hasta el origen − 4 semanas.
+    - **SKU con stock del mes:** el mínimo de la historia es 0,81, y 0,76 con la corrida anterior 13 semanas antes, como en enero; en ningún caso hubo aviso.
+    - **Venta entre salidas de stock del mes.** Por semana, las unidades vendidas entre las salidas de stock. Las salidas son, por SKU y día, lo que bajó el stock desde el día anterior.
+      - El conteo de filas de venta no sirve para el mes: la semana previa al Hot Sale cae sola a 0,50, igual que un mes a medias, y contra el año anterior cae a 0,16 porque el Hot Sale cambia de fecha.
+      - Un evento mueve la venta y las salidas a la vez, pero una venta incompleta solo baja la venta.
+      - En la historia, el mínimo es 0,70, con 1 o 2 avisos y ninguna detención con la corrida anterior 4 o 5 semanas antes, y 6 avisos con 13.
+      - Un mes entero a la mitad se detiene en 60 de 69 orígenes; una sola semana a la mitad, en 41.
+      - **Solo vale porque el stock viene de los movimientos del almacén, independiente de la venta.** Si algún día el stock se calculara desde la venta, las dos fallarían juntas y la razón no cambiaría.
+      - Si a una semana nueva le faltan salidas de stock, queda `sin datos` y el log dice que la venta del mes no se verificó. No detiene el job, y `aceptar_drift` no la vuelve estable.
   - **Corte del stock.** El job se detiene si el stock atrasa el origen una semana o más.
     - features corta en la última semana completa de las dos tablas. Sin stock reciente no quedan nulos: el origen se queda atrás.
   - **Liberar el freno.** El job tiene el parámetro `aceptar_drift`, que recibe la fecha del origen.

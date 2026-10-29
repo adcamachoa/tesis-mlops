@@ -111,6 +111,90 @@ def test_cobertura_contra_la_semana_mas_baja_de_las_4_anteriores():
     assert monitoreo.nivel_cobertura(0.7) == "aviso" and monitoreo.nivel_cobertura(0.9) == "estable"
 
 
+MES = pd.date_range("2026-09-14", periods=9, freq="7D")  # 4 semanas revisadas hasta el 5-oct y 5 nuevas
+REVISADO, ORIGEN_MES = MES[3], MES[-1]
+
+
+def test_el_mes_entero_a_medias_lo_ve_la_cobertura_del_mes_y_no_la_de_la_semana():
+    a_medias = pd.Series([100, 104, 98, 101, 50, 52, 49, 51, 50], index=MES, dtype=float)
+    # la semana del origen contra las 4 anteriores, igual de rotas, se ve normal
+    assert monitoreo.nivel_cobertura(monitoreo.cobertura(a_medias, ORIGEN_MES)) == "estable"
+    revision = monitoreo.revisar_cobertura_mes(ORIGEN_MES, REVISADO, {"venta_salidas": a_medias}).iloc[0]
+    assert revision["valor"] == pytest.approx(49 / 98) and revision["nivel"] == "extremo"
+    assert revision["referencia"] == 5  # semanas nuevas: la corrida anterior fue origen − 5 semanas
+    normal = pd.Series([100, 104, 98, 101, 99, 120, 97, 103, 100], index=MES, dtype=float)
+    assert monitoreo.cobertura_mes(normal, ORIGEN_MES, REVISADO, nulo_es_cero=False) == pytest.approx(97 / 98)
+    # una sola semana a medias a mitad del mes también
+    una = normal.copy()
+    una.iloc[6] = 50
+    valor = monitoreo.cobertura_mes(una, ORIGEN_MES, REVISADO, nulo_es_cero=False)
+    assert monitoreo.nivel_cobertura(valor) == "extremo"
+
+
+def test_sin_salidas_de_stock_la_venta_del_mes_queda_sin_verificar():
+    sin_stock = pd.Series([1.0, 1.1, 0.9, 1.0, 1.0, np.nan, np.nan, np.nan, np.nan], index=MES)
+    revisiones = monitoreo.revisar_cobertura_mes(
+        ORIGEN_MES, REVISADO, {"skus_con_stock": sin_stock * 1000, "venta_salidas": sin_stock}
+    ).set_index("variable")
+    assert revisiones.loc["skus_con_stock", "nivel"] == "extremo"  # sin SKU con stock, la semana cuenta 0
+    venta = revisiones.loc["venta_salidas"]
+    assert np.isnan(venta["valor"]) and venta["nivel"] == "sin datos"
+    texto = monitoreo.describir(revisiones.reset_index().iloc[1])
+    assert texto.startswith("la venta del mes no se verificó")
+    # sola no detiene el job; con el extremo del stock, aceptar_drift libera el extremo, pero la venta sigue sin
+    # verificar
+    assert "sin cambios extremos" in monitoreo.revisar_detencion(revisiones.reset_index().iloc[[1]], ORIGEN_MES, None)
+    resultado = monitoreo.revisar_detencion(revisiones.reset_index(), ORIGEN_MES, ORIGEN_MES)
+    assert "aceptado" in resultado and "la venta del mes no se verificó" not in resultado
+    assert revisiones.loc["venta_salidas", "nivel"] == "sin datos"
+
+
+def test_venta_entre_salidas():
+    semanas = pd.date_range("2026-10-05", periods=3, freq="7D")
+    unidades = pd.Series([120.0, 80.0], index=semanas[:2])
+    salidas = pd.Series([100.0, 0.0, 50.0], index=semanas)
+    razon = monitoreo.venta_entre_salidas(unidades, salidas)
+    assert razon.iloc[0] == pytest.approx(1.2) and np.isnan(razon.iloc[1])  # sin salidas, sin dato
+    assert razon.iloc[2] == 0  # salidas sin venta
+    ventas = pd.DataFrame({"fecha": pd.to_datetime(["2026-10-05", "2026-10-11", "2026-10-12"]), "unidades": [2, 3, 4]})
+    assert monitoreo.unidades_por_semana(ventas).tolist() == [5, 4]
+
+
+def _revisiones_previas(*corridas) -> pd.DataFrame:
+    """monitoreo_datos con una corrida por (origen, extremo, aceptado)."""
+    return pd.DataFrame([
+        {"fecha_corrida": pd.Timestamp(origen) + pd.Timedelta(days=8), "origen": pd.Timestamp(origen).date(),
+         "nivel": nivel, "aceptado": aceptado}
+        for origen, extremo, aceptado in corridas
+        for nivel in (["estable", "extremo"] if extremo else ["estable", "aviso"])
+    ])
+
+
+def test_la_corrida_anterior_es_la_ultima_que_reviso_sus_semanas():
+    origen = pd.Timestamp("2026-12-07")
+    previas = _revisiones_previas(("2026-10-12", False, False), ("2026-11-09", True, False))
+    # la del 9-nov se detuvo y nadie la aceptó: sus semanas no cuentan como revisadas
+    assert monitoreo.origen_revisado(origen, previas, []) == pd.Timestamp("2026-10-12")
+    aceptada = _revisiones_previas(("2026-10-12", False, False), ("2026-11-09", True, True))
+    assert monitoreo.origen_revisado(origen, aceptada, []) == pd.Timestamp("2026-11-09")
+    # una corrida repetida con el mismo origen no se toma como anterior
+    assert monitoreo.origen_revisado(pd.Timestamp("2026-10-12"), previas, []) == pd.Timestamp("2026-09-14")
+
+
+def test_primera_corrida_sin_monitoreo_previo_usa_el_ultimo_origen_pronosticado():
+    # como la de enero en prod: monitoreo_datos todavía no existe y predicciones tiene la corrida del 12-oct
+    vacia = pd.DataFrame(columns=["fecha_corrida", "origen", "nivel", "aceptado"])
+    origen = pd.Timestamp("2027-01-11")
+    pronosticados = [pd.Timestamp("2026-10-12").date(), origen.date()]  # también una corrida de este mismo origen
+    revisado = monitoreo.origen_revisado(origen, vacia, pronosticados)
+    assert revisado == pd.Timestamp("2026-10-12")
+    serie = pd.Series(1.0, index=pd.date_range("2026-09-21", origen, freq="7D"))
+    revision = monitoreo.revisar_cobertura_mes(origen, revisado, {"venta_salidas": serie}).iloc[0]
+    assert revision["referencia"] == 13 and revision["nivel"] == "estable"
+    # sin ninguna corrida anterior, las 4 semanas hasta origen − 4
+    assert monitoreo.origen_revisado(origen, vacia, []) == origen - pd.Timedelta(weeks=4)
+
+
 def test_conteos_semanales():
     fechas = pd.Series(pd.to_datetime(["2026-10-05", "2026-10-11", "2026-10-12", "2026-10-12"]))
     filas = monitoreo.filas_por_semana(fechas)

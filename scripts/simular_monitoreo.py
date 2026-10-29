@@ -25,6 +25,7 @@ from train import venta_diaria_serie
 DATOS = Path("data")
 GUARDADOS = DATOS / "_local"
 PRIMER_ORIGEN = pd.Timestamp("2024-03-04")  # con menos de 2 meses de ventana el PSI no dice nada
+INICIO_STOCK_COMPLETO = pd.Timestamp("2025-05-05")  # antes faltan los SKU que todavía no se movían
 SEMANAS_EFECTO = 4  # un evento pesa en la historia del origen mientras está en las últimas 4 semanas (media_4)
 EVENTOS = ("Hot Sale", "El Buen Fin")
 CHAMPION = "lightgbm_tweedie_211"  # el algoritmo del champion en dev y prod
@@ -82,6 +83,22 @@ def conteos_cobertura(panel: pd.DataFrame) -> dict[str, pd.Series]:
     return {
         "skus_con_stock": monitoreo.skus_con_stock_por_semana(panel),
         "filas_venta": monitoreo.filas_por_semana(fechas),
+    }
+
+
+def series_mes(panel: pd.DataFrame) -> dict[str, pd.Series]:
+    """Las series semanales de la cobertura del mes, como en src/monitoreo_datos.py. Las salidas de stock salen del
+    stock diario completo y quedan guardadas en data/_local/."""
+    ruta = GUARDADOS / "salidas.parquet"
+    if not ruta.exists():
+        stock = pd.read_parquet(DATOS / "stock_diario.parquet")
+        stock["sku"] = stock["sku"].astype("category")
+        monitoreo.salidas_por_semana(stock).rename("salidas").to_frame().to_parquet(ruta)
+    salidas = pd.read_parquet(ruta)["salidas"]
+    unidades = monitoreo.unidades_por_semana(pd.read_parquet(DATOS / "ventas_diarias.parquet"))
+    return {
+        "skus_con_stock": monitoreo.skus_con_stock_por_semana(panel),
+        "venta_salidas": monitoreo.venta_entre_salidas(unidades, salidas),
     }
 
 
@@ -172,6 +189,46 @@ def calibrar(datos: dict[str, pd.DataFrame]) -> None:
     extremos = niveles[niveles["nivel"] == "extremo"]
     print("\nDetenciones: " + ("; ".join(f"{f.origen.date()} {monitoreo.describir(f)}" for f in extremos.itertuples())
                               or "ninguna"))
+    calibrar_mes(datos["panel_semanal"])
+
+
+def calibrar_mes(panel: pd.DataFrame) -> None:
+    """Cobertura del mes en cada origen semanal, con la corrida anterior 4, 5 o 13 semanas antes (13 es la primera
+    corrida de enero en prod), y qué tan seguido detecta un mes entero o una semana a medias."""
+    print("\nCobertura del mes: la semana nueva más baja contra la más baja de las 4 que revisó la corrida anterior\n")
+    filas, detecciones = [], []
+    for variable, serie in series_mes(panel).items():
+        nulo_es_cero = variable == "skus_con_stock"
+        for salto in (4, 5, 13):
+            desde = INICIO_STOCK_COMPLETO + pd.Timedelta(weeks=salto + monitoreo.SEMANAS_REVISADAS - 1)
+            origenes = serie.index[serie.index >= desde]
+            valores = pd.Series({o: monitoreo.cobertura_mes(serie, o, o - pd.Timedelta(weeks=salto), nulo_es_cero)
+                                 for o in origenes}).dropna()
+            bajos = valores.nsmallest(2)
+            filas.append({
+                "revisión": variable, "corrida anterior": f"{salto} semanas antes", "orígenes": len(valores),
+                "mínimo": f"{valores.min():.2f}", "p5": f"{valores.quantile(0.05):.2f}",
+                "mediana": f"{valores.median():.2f}",
+                "avisos": int((valores <= monitoreo.COBERTURA_AVISO).sum()),
+                "detenciones": int((valores <= monitoreo.COBERTURA_EXTREMO).sum()),
+                "más bajos": ", ".join(f"{o.date()} {v:.2f}" for o, v in bajos.items()),
+            })
+        origenes = serie.index[serie.index >= INICIO_STOCK_COMPLETO + pd.Timedelta(weeks=7)]
+        for rotura, semanas, f in (("mes entero a la mitad", range(4), 0.5), ("mes entero al 70 %", range(4), 0.7),
+                                   ("una semana a la mitad", [2], 0.5)):
+            valores = []
+            for o in origenes:
+                rota = serie.copy()
+                for k in semanas:
+                    rota.loc[o - pd.Timedelta(weeks=k)] *= f
+                valores.append(monitoreo.cobertura_mes(rota, o, o - pd.Timedelta(weeks=4), nulo_es_cero))
+            valores = pd.Series(valores).dropna()
+            detecciones.append({"revisión": variable, "rotura": rotura, "orígenes": len(valores),
+                                "avisos": int((valores <= monitoreo.COBERTURA_AVISO).sum()),
+                                "detenciones": int((valores <= monitoreo.COBERTURA_EXTREMO).sum())})
+    print(_tabla(pd.DataFrame(filas)))
+    print("\nDetección con la corrida anterior 4 semanas antes:\n")
+    print(_tabla(pd.DataFrame(detecciones)))
 
 
 def backtest_local(base: pd.DataFrame, origenes: list[pd.Timestamp]) -> tuple[pd.DataFrame, pd.Series]:

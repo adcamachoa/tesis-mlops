@@ -4,13 +4,14 @@ Funciones puras en pandas. Los umbrales están documentados en CLAUDE.md.
 
 - Drift de datos: compara las variables principales de las series en el origen con la ventana de entrenamiento del
   champion, con el PSI de cada variable sin nulos y, aparte, la parte de nulos contra los últimos 13 orígenes de la
-  ventana. Revisa también lo que el PSI no ve: la cobertura de la semana del origen (SKU con stock y filas de venta) y
-  que el stock llegue a la última semana con venta. Un nivel extremo detiene el job antes de entrenar, salvo que una
-  persona lo acepte para ese origen.
+  ventana. Revisa también lo que el PSI no ve: la cobertura de la semana del origen (SKU con stock y filas de venta), la
+  del mes contra las semanas que ya revisó la corrida anterior (SKU con stock y venta entre salidas de stock) y que el
+  stock llegue a la última semana con venta. Un nivel extremo detiene el job antes de entrenar, salvo que una persona
+  lo acepte para ese origen.
 - Desempeño: mide cada pronóstico en vivo con el formato estándar cuando cierran sus tres ventanas, y compara el WAPE y
   el sesgo con el mínimo y el máximo por origen del backtest de la versión que pronosticó.
 
-Nada de esto lleva piezas: el PSI, la parte de nulos, el WAPE, el MAPE y el sesgo son proporciones.
+Nada de esto lleva piezas: el PSI, la parte de nulos, las coberturas, el WAPE, el MAPE y el sesgo son proporciones.
 """
 import numpy as np
 import pandas as pd
@@ -36,7 +37,8 @@ PSI_EXTREMO = 1.0
 SEMANAS_NULOS = 13  # los nulos del origen se comparan con los de los últimos 13 orígenes de la ventana
 NULOS_AVISO = 0.10  # aumento de la parte de nulos, en puntos
 SEMANAS_COBERTURA = 4  # la semana del origen se compara con la más baja de las 4 anteriores
-COBERTURA_AVISO = 0.75
+SEMANAS_REVISADAS = 4  # las semanas nuevas del mes se comparan con la más baja de las 4 que revisó la corrida anterior
+COBERTURA_AVISO = 0.75  # los mismos para la semana y para el mes
 COBERTURA_EXTREMO = 0.6
 SEMANAS_ATRASO = 1  # semanas que el stock puede atrasar el origen antes de detener el job
 COLUMNAS_DATOS = ["origen", "revision", "variable", "valor", "referencia", "umbral_aviso", "umbral_extremo", "nivel"]
@@ -114,11 +116,93 @@ def drift_datos(base: pd.DataFrame, origen: pd.Timestamp, variables=VARIABLES) -
     return pd.DataFrame(filas, columns=COLUMNAS_DATOS)
 
 
+def _lunes(fechas: pd.Series) -> pd.Series:
+    fechas = pd.to_datetime(fechas)
+    return fechas - pd.to_timedelta(fechas.dt.dayofweek, unit="D")
+
+
 def filas_por_semana(fechas: pd.Series) -> pd.Series:
     """Cuántas filas hay en cada semana, indexadas por su lunes: con las fechas de ventas_diarias, los SKU × día con
     venta."""
-    fechas = pd.to_datetime(fechas)
-    return (fechas - pd.to_timedelta(fechas.dt.dayofweek, unit="D")).value_counts().sort_index()
+    return _lunes(fechas).value_counts().sort_index()
+
+
+def unidades_por_semana(ventas: pd.DataFrame) -> pd.Series:
+    """Unidades vendidas en cada semana (fecha y unidades de ventas_diarias), indexadas por su lunes."""
+    return ventas["unidades"].groupby(_lunes(ventas["fecha"])).sum().astype(float)
+
+
+def salidas_por_semana(stock: pd.DataFrame) -> pd.Series:
+    """Salidas de stock de cada semana (fecha, sku y stock de stock_diario), indexadas por su lunes.
+
+    Por SKU y día, lo que bajó el stock desde el día anterior: 0 si subió o si no hay dato del día anterior. El stock
+    viene de los movimientos del almacén, independiente de la venta. src/monitoreo_datos.py lo calcula igual en Spark.
+    """
+    stock = stock.sort_values(["sku", "fecha"], kind="stable")
+    por_sku = stock.groupby("sku", observed=True)
+    consecutivo = stock["fecha"] - por_sku["fecha"].shift(1) == pd.Timedelta(days=1)
+    salida = (por_sku["stock"].shift(1) - stock["stock"]).clip(lower=0).where(consecutivo, 0)
+    return salida.groupby(_lunes(stock["fecha"])).sum().astype(float)
+
+
+def venta_entre_salidas(unidades: pd.Series, salidas: pd.Series) -> pd.Series:
+    """Unidades vendidas entre salidas de stock, por semana; nula si la semana no tiene salidas. Un evento mueve las dos
+    cosas a la vez, pero una venta que llega incompleta solo baja la venta."""
+    semanas = unidades.index.union(salidas.index)
+    salidas = salidas.reindex(semanas)
+    return unidades.reindex(semanas, fill_value=0) / salidas.where(salidas > 0)
+
+
+def origen_revisado(origen: pd.Timestamp, revisiones: pd.DataFrame, origenes_pronosticados) -> pd.Timestamp:
+    """El origen de la última corrida anterior a `origen` cuyas semanas ya se revisaron.
+
+    Cuentan los orígenes de monitoreo_datos cuya corrida no tuvo extremos o los aceptó (`revisiones` trae fecha_corrida,
+    origen, nivel y aceptado), y los de predicciones, porque una corrida que se detuvo no pronostica. Si no hay ninguno
+    anterior, como en la primera corrida de un schema nuevo, origen − 4 semanas.
+    """
+    candidatos = set(pd.to_datetime(list(origenes_pronosticados)))
+    if len(revisiones):
+        por_corrida = revisiones.groupby(["fecha_corrida", "origen"]).agg(
+            extremo=("nivel", lambda n: bool((n == "extremo").any())), aceptado=("aceptado", "any")
+        ).reset_index()
+        candidatos |= set(pd.to_datetime(por_corrida.loc[~por_corrida["extremo"] | por_corrida["aceptado"], "origen"]))
+    anteriores = [o for o in candidatos if o < origen]
+    return max(anteriores) if anteriores else origen - pd.Timedelta(weeks=SEMANAS_REVISADAS)
+
+
+def cobertura_mes(serie: pd.Series, origen: pd.Timestamp, revisado: pd.Timestamp, nulo_es_cero: bool) -> float:
+    """La semana nueva más baja (de `revisado` + 1 al origen) entre la más baja de las 4 semanas hasta `revisado`, que
+    ya revisó la corrida anterior.
+
+    Con el refresco mensual llegan 4 o 5 semanas a la vez: si todas vienen rotas, la cobertura semanal las compara entre
+    sí y no lo ve. Con `nulo_es_cero`, una semana nueva sin dato cuenta 0; si no, la revisión queda nula. También es
+    nula si a las semanas revisadas les falta dato o si la más baja es 0.
+    """
+    revisadas = serie.reindex(pd.date_range(end=revisado, periods=SEMANAS_REVISADAS, freq="7D"))
+    nuevas = serie.reindex(pd.date_range(revisado + pd.Timedelta(weeks=1), origen, freq="7D"))
+    if nuevas.empty or revisadas.isna().any() or revisadas.min() <= 0:
+        return np.nan
+    if nulo_es_cero:
+        nuevas = nuevas.fillna(0)
+    elif nuevas.isna().any():
+        return np.nan
+    return float(nuevas.min() / revisadas.min())
+
+
+def revisar_cobertura_mes(origen: pd.Timestamp, revisado: pd.Timestamp, conteos: dict[str, pd.Series]) -> pd.DataFrame:
+    """Revisiones de la cobertura del mes, una por serie semanal (`skus_con_stock` y `venta_salidas`); `referencia` es
+    cuántas semanas nuevas se compararon, así que la corrida anterior es origen − referencia semanas.
+
+    Sin SKU con stock, la semana cuenta 0. Sin salidas de stock, venta entre salidas queda `sin datos`: la venta del mes
+    no se pudo verificar, y aceptar_drift no la cambia.
+    """
+    semanas = float((origen - revisado).days // 7)
+    filas = []
+    for variable, serie in conteos.items():
+        valor = cobertura_mes(serie, origen, revisado, nulo_es_cero=variable == "skus_con_stock")
+        filas.append((origen, "cobertura_mes", variable, valor, semanas, COBERTURA_AVISO, COBERTURA_EXTREMO,
+                      nivel_cobertura(valor)))
+    return pd.DataFrame(filas, columns=COLUMNAS_DATOS)
 
 
 def skus_con_stock_por_semana(panel: pd.DataFrame) -> pd.Series:
@@ -183,6 +267,15 @@ def describir(revision) -> str:
         valor = "sin datos" if np.isnan(revision.valor) else f"{revision.valor:.2f}"
         return (f"cobertura de {revision.variable} {valor} contra la semana más baja de las {SEMANAS_COBERTURA} "
                 f"anteriores ({revision.nivel})")
+    if revision.revision == "cobertura_mes":
+        revisado = (pd.Timestamp(revision.origen) - pd.Timedelta(weeks=int(revision.referencia))).date()
+        if np.isnan(revision.valor) and revision.variable == "venta_salidas":
+            return (f"la venta del mes no se verificó: faltan salidas de stock en las semanas nuevas desde el origen "
+                    f"{revisado} ({revision.nivel})")
+        valor = "sin datos" if np.isnan(revision.valor) else f"{revision.valor:.2f}"
+        return (f"cobertura del mes de {revision.variable} {valor}: la más baja de las {int(revision.referencia)} "
+                f"semanas nuevas contra la más baja de las {SEMANAS_REVISADAS} revisadas hasta el origen {revisado} "
+                f"({revision.nivel})")
     return f"el stock atrasa el origen {revision.valor:.0f} semanas ({revision.nivel})"
 
 
