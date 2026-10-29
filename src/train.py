@@ -34,6 +34,9 @@ from common.features import HORIZONTE, SERIE
 COLORES = {"real": "#2a78d6", "pronostico": "#eb6834", "texto": "#52514e", "eje": "#c3c2b7", "rejilla": "#e1e0d9"}
 FONDO = "#fcfcfb"
 SEMANAS_PREVIAS = 12  # semanas de venta real antes del origen en cada panel de la gráfica
+# las predicciones del backtest de cada modelo, en su run: las leen monitoreo_desempeno (rango) y export (métricas por
+# nodo), así que los runs no se borran
+ARTEFACTO_BACKTEST = "predicciones_backtest.parquet"
 
 
 def venta_diaria_serie(ventas: DataFrame, productos: DataFrame) -> DataFrame:
@@ -193,7 +196,7 @@ def main():
                 del_modelo = predicciones[predicciones["modelo"] == nombre]
                 mlflow.log_figure(grafica_total(del_modelo, venta_diaria, nombre), "real_vs_pronostico_total.png")
                 with tempfile.TemporaryDirectory() as carpeta:
-                    ruta = Path(carpeta) / "predicciones_backtest.parquet"
+                    ruta = Path(carpeta) / ARTEFACTO_BACKTEST
                     del_modelo.to_parquet(ruta)
                     mlflow.log_artifact(str(ruta))
                 runs[nombre] = hijo.info.run_id

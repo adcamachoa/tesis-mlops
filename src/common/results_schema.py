@@ -1,11 +1,15 @@
 """Esquemas de los datos de la página: results.json (un pronóstico) y manifest.json (la lista de pronósticos). Los
 escribe src/export_results.py y los lee la página de tesis-mlops-web.
 
-`ESQUEMA` es un JSON Schema (draft 2020-12). `validar` además revisa lo que JSON Schema no alcanza: que no haya números
-no finitos, que cada serie traiga tantas semanas reales como `semanas.real`, que haya un solo total y que la venta real
-del total promedie 100. También que la venta real del horizonte (`real_horizonte` y `ventanas_real`) traiga valor
-exactamente en las semanas y ventanas que cerraron hasta `real_hasta`, y que el pronóstico anterior cubra las mismas
-semanas en todas las series. La página es pública: la venta y el pronóstico van como índice, nunca en piezas.
+`ESQUEMA` es un JSON Schema (draft 2020-12) de la versión 2: `series` es el árbol total → submarca → departamento →
+categoría → serie, más los nodos `otras`, cada uno con su padre y las métricas del backtest a su nivel. `validar`
+además revisa lo que JSON Schema no alcanza: que no haya números no finitos, que cada serie traiga tantas semanas reales
+como `semanas.real`, que haya un solo total y que la venta real del total promedie 100; que la venta real del horizonte
+(`real_horizonte` y `ventanas_real`) traiga valor exactamente en las semanas y ventanas que cerraron hasta
+`real_hasta`, y que el pronóstico anterior cubra las mismas semanas en todas las series. Del árbol revisa que los `id`
+no se repitan, que cada padre exista y sea del nivel anterior, que ningún nodo baje del índice mínimo (por debajo, sus
+valores de 1 a 3 piezas dejarían ver el escalón de una pieza), que los hijos no sumen más que su padre y que cada nodo
+traiga los modelos de `metricas`. La página es pública: la venta y el pronóstico van como índice, nunca en piezas.
 
 `ESQUEMA_MANIFEST` y `validar_manifest` siguen las reglas de revisarManifest de tesis-mlops-web (docs/js/datos.js): si
 la web cambia sus reglas, se cambian aquí también. `validar_manifest` revisa además que cada entrada tenga su
@@ -24,15 +28,19 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from common.arbol import NIVELES, OTRAS
 from common.features import HORIZONTE
 from common.metrics import METRICAS, VENTANAS_DIAS
 
-VERSION = 1
+VERSION = 2  # la 2 trae el árbol completo y las métricas por nodo; la 1 traía el total, las submarcas y 20 series
 VERSION_MANIFEST = 1
 MANIFEST = "manifest.json"
 BASE_INDICE = 100
 ESCALA = "índice: 100 = venta semanal promedio del total en las semanas de venta real mostradas"
 TOLERANCIA_BASE = 0.1  # el promedio del total se calcula con los valores ya redondeados
+REDONDEO = 0.05  # lo que puede moverse un valor al redondearlo a 1 decimal
+# el formato estándar de cada nodo, sin MAE ni RMSE (van en piezas) ni el WAPE tipo × mes (es de los tipos de producto)
+METRICAS_NODO = ("wape_m1", "wape_m2", "wape_total", "mape_m1", "mape_m2", "mape_total", "sesgo_total")
 
 # además de su forma, las fechas tienen que existir (no "2026-13-01"), como en la página
 _FORMATOS = FormatChecker(formats=())
@@ -59,6 +67,7 @@ _INDICE = {"type": "number", "minimum": 0}
 _INDICE_O_NULO = {"type": ["number", "null"], "minimum": 0}  # nulo donde todavía no se conoce
 _METRICA = {"type": ["number", "null"]}  # nula si no se puede calcular, por ejemplo un MAPE sin celdas con venta
 _ID = {"type": "string", "pattern": r"^[a-z0-9-]+$"}  # va en la dirección de la página: …/#2026-10-12
+_ID_NODO = {"type": "string", "pattern": r"^[a-z0-9-]+(/[a-z0-9-]+)*$"}  # la ruta del nodo: submarca-a/bebe-nino
 # relativa al manifest, con la expresión de la página: cada parte empieza con letra o número, así que no hay "..", "/"
 # inicial ni "https:"
 _RUTA = {"type": "string", "pattern": r"^([A-Za-z0-9][A-Za-z0-9_.-]*/)*[A-Za-z0-9][A-Za-z0-9_.-]*\.json$"}
@@ -80,6 +89,8 @@ ESQUEMA = {
             "version_esquema": {"const": VERSION},
             "generado": _FECHA_HORA,
             "escala": {"const": ESCALA},
+            # un nodo se publica si el índice promedio semanal de su venta real llega a este mínimo
+            "indice_minimo": {"type": "number", "exclusiveMinimum": 0},
             "real_hasta": _FECHA,  # el último domingo con venta real: llega más allá del origen en las semanas cerradas
             "corrida": _objeto(
                 {"fecha_prediccion": _FECHA_HORA, "fecha_entrenamiento": _FECHA_HORA, "origen": _FECHA,
@@ -102,11 +113,19 @@ ESQUEMA = {
                          "dias": {"type": "integer", "minimum": 1}}),
                 len(VENTANAS_DIAS),
             ),
+            # el árbol, en profundidad: cada padre antes de sus hijos
             "series": _lista(
                 _objeto(
                     {
-                        "nivel": {"enum": ["total", "submarca", "serie"]},
-                        "nombre": _TEXTO,
+                        "id": _ID_NODO,
+                        "padre": {"anyOf": [_ID_NODO, {"type": "null"}]},  # nulo solo en el total
+                        "nivel": {"enum": [*NIVELES, OTRAS]},
+                        "nombre": _TEXTO,  # el completo: "Submarca A | Departamento | Categoría | Tipo"
+                        "etiqueta": _TEXTO,  # el del nodo solo
+                        # el formato estándar del backtest, con la venta y el pronóstico sumados al nodo
+                        "metricas": _lista(
+                            _objeto({"modelo": _TEXTO, **dict.fromkeys(METRICAS_NODO, _METRICA)})
+                        ),
                         "real": _lista(_INDICE),
                         "pronostico": _lista(_INDICE, HORIZONTE),
                         "ventanas": _lista(_INDICE, len(VENTANAS_DIAS)),
@@ -200,8 +219,49 @@ def validar(resultados: dict) -> None:
         # sin el promedio: si la venta viniera en piezas, sería la venta semanal del total, y el error puede llegar
         # al log público
         problemas.append(f"la venta real del total no promedia {BASE_INDICE}: tiene que ir como índice")
+    if problemas:  # el árbol se revisa con las longitudes ya correctas
+        raise ErrorEsquema(problemas)
+    problemas = _problemas_del_arbol(resultados)
     if problemas:
         raise ErrorEsquema(problemas)
+
+
+def _problemas_del_arbol(resultados: dict) -> list[str]:
+    """Lo que el árbol de `series` tiene que cumplir, además del esquema."""
+    nodos, problemas = resultados["series"], []
+    por_id = {}
+    for nodo in nodos:
+        if nodo["id"] in por_id:
+            problemas.append(f"el id {nodo['id']} aparece dos veces")
+        por_id[nodo["id"]] = nodo
+    modelos = [m["modelo"] for m in resultados["metricas"]]
+    hijos: dict[str, list[dict]] = {}
+    for nodo in nodos:
+        nombre, padre = nodo["nombre"], por_id.get(nodo["padre"])
+        if (nodo["nivel"] == "total") != (nodo["padre"] is None):
+            problemas.append(f"el nodo {nombre} tiene padre nulo y no es el total, o es el total y tiene padre")
+        elif nodo["padre"] is not None and padre is None:
+            problemas.append(f"el padre de {nombre} no está en el árbol")
+        elif padre is not None:
+            hijos.setdefault(padre["id"], []).append(nodo)
+            if padre["nivel"] in (OTRAS, NIVELES[-1]) or (
+                nodo["nivel"] != OTRAS and NIVELES.index(nodo["nivel"]) != NIVELES.index(padre["nivel"]) + 1
+            ):
+                problemas.append(f"el nodo {nombre} ({nodo['nivel']}) no puede colgar de un nodo {padre['nivel']}")
+        if nodo["nivel"] != "total":
+            if sum(nodo["real"]) / len(nodo["real"]) < resultados["indice_minimo"] - REDONDEO:
+                problemas.append(f"el nodo {nombre} no llega al índice mínimo de {resultados['indice_minimo']}")
+        if [m["modelo"] for m in nodo["metricas"]] != modelos:
+            problemas.append(f"el nodo {nombre} no trae en metricas los mismos modelos que la raíz")
+    # los hijos no suman más que su padre, salvo el redondeo de cada uno
+    for padre_id, de_padre in hijos.items():
+        padre = por_id[padre_id]
+        holgura = REDONDEO * (len(de_padre) + 1)
+        for campo in ("real", "pronostico", "ventanas"):
+            sumas = [sum(h[campo][i] for h in de_padre) for i in range(len(padre[campo]))]
+            if any(s > v + holgura for s, v in zip(sumas, padre[campo], strict=True)):
+                problemas.append(f"los hijos de {padre['nombre']} suman más que el nodo en {campo}")
+    return problemas
 
 
 def validar_manifest(manifest: dict, archivos: dict[str, dict]) -> None:
