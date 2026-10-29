@@ -109,6 +109,7 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - `toca_reentrenar` es un `condition_task`. Si toca, sigue train → predict; si no, quedan excluidos y el pronóstico publicado no cambia.
   - `export` corre en las dos ramas, con `run_if: NONE_FAILED`: depende de `predict` y de la rama `false` de la condición. No exporta si `train` o `predict` fallan.
   - Un drift extremo de datos detiene el job en `monitoreo_datos`: no reentrena.
+  - `ingest` y `monitoreo_datos` llevan `disable_auto_optimization: true`. Serverless reintenta una tarea que falla, y sus fallas son detenciones a propósito: el freno se repetía, y un drift extremo escribiría sus revisiones dos veces.
 - **Cuándo toca reentrenar.** Lo decide `monitoreo_desempeno` y lo publica como task value booleano `reentrenar`.
   - Cuando el origen queda 4 semanas o más después del último origen de `predicciones`. Desde el 12-oct-2026 da los orígenes 9-nov, 7-dic y 4-ene, con corridas los lunes 16-nov, 14-dic y 11-ene.
   - O antes, si alguna medición con alerta cerró después del `datos_hasta` del último pronóstico, es decir, si trae información que el último entrenamiento no conocía.

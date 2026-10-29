@@ -94,6 +94,13 @@ def test_cada_tarea_corre_su_script_sobre_el_schema_del_target(job):
         assert tarea["environment_key"] in entornos
 
 
+def test_las_detenciones_a_proposito_no_se_reintentan(tareas):
+    # serverless reintenta una tarea que falla: el freno y un drift extremo se repetirían, y monitoreo_datos
+    # escribiría sus revisiones dos veces
+    sin_reintento = {k for k, t in tareas.items() if t.get("disable_auto_optimization")}
+    assert sin_reintento == {"ingest", "monitoreo_datos"}
+
+
 def test_los_parametros_van_vacios_en_cada_corrida_normal(job):
     # existen para liberar un origen o forzar un reentrenamiento a mano; en la configuración siempre van vacíos
     assert job["parameters"] == [{"name": "aceptar_drift", "default": ""}, {"name": "reentrenar", "default": ""}]

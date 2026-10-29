@@ -58,8 +58,10 @@ resources:
           default: ""
       tasks:
         # se detiene sin gastar la corrida si los datos no traen un domingo nuevo; publica bronze_version como task
-        # value, y train la lee con este task_key
+        # value, y train la lee con este task_key. Sin el reintento automático de serverless: una detención a
+        # propósito no se arregla repitiéndola
         - task_key: ingest
+          disable_auto_optimization: true
           environment_key: default
           spark_python_task:
             python_file: src/ingest.py
@@ -72,10 +74,12 @@ resources:
             python_file: src/features.py
             parameters: ["--schema", "${var.schema}"]
         # con un cambio extremo en los datos falla antes de train: no se gasta el entrenamiento ni se registra un
-        # champion entrenado con datos rotos, salvo que aceptar_drift traiga la fecha de este origen
+        # champion entrenado con datos rotos, salvo que aceptar_drift traiga la fecha de este origen. Sin reintento
+        # automático: repetirla escribiría sus revisiones dos veces
         - task_key: monitoreo_datos
           depends_on:
             - task_key: features
+          disable_auto_optimization: true
           environment_key: default
           spark_python_task:
             python_file: src/monitoreo_datos.py

@@ -809,6 +809,7 @@ Diseño:
     - Las tareas excluidas cuentan como éxito, así que `export` corre en las dos ramas, y no corre si `train` o `predict` fallan.
     - `AT_LEAST_ONE_SUCCESS` exportaría aunque `predict` falle.
   - **Programación:** lunes a las 9:00, `America/Bogota`. La variable `programacion` vale `PAUSED` por defecto y `UNPAUSED` en prod.
+  - **Sin reintento automático** (`disable_auto_optimization: true`) en `ingest` y `monitoreo_datos`, cuyas fallas son detenciones a propósito.
   - **Parámetros:** `aceptar_drift`, como antes, y `reentrenar` (vacío o `si`).
 - **Cuándo toca reentrenar** (`monitoreo.decidir_reentrenamiento`):
   - cuando el origen queda 4 semanas o más después del último origen de `predicciones`;
@@ -856,6 +857,8 @@ Resultado (29-oct-2026):
     - Trae el origen 12-oct, con la corrida de las 06:12:58 y la versión 4.
     - En dev, `real_horizonte`, `ventanas_real` y `pronostico_anterior` quedan nulos: los datos de dev no pasan del 18-oct y no hay un origen anterior al 12-oct. Los valores los cubren las pruebas.
   - **Serverless reintenta una tarea que falla, aunque la falla sea a propósito.** En la corrida frenada, `ingest` corrió dos veces (0,9 y 0,5 min).
+    - Por eso `ingest` y `monitoreo_datos` llevan `disable_auto_optimization: true`. En `monitoreo_datos`, un drift extremo repetido escribiría sus revisiones dos veces.
+    - Databricks lo aceptó en serverless. En la corrida frenada siguiente, `ingest` corrió una sola vez (intento 0) y la corrida tardó 1,3 min.
   - `predicciones` de dev tiene `appendOnly`, así que la corrida nueva solo se agregó. En la corrida normal, `monitoreo_desempeno` todavía leía las del 12-oct de las 16:28:09 (versión 2) y las 17:47:13 (versión 3). No se volvió a consultar la tabla después.
 
 ---
