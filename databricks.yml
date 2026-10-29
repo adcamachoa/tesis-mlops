@@ -1,7 +1,8 @@
-# Asset Bundle del pipeline de demanda: el job demanda_pipeline con las cinco tareas encadenadas.
+# Asset Bundle del pipeline de demanda: el job demanda_pipeline con sus siete tareas encadenadas.
 #   databricks bundle validate -t dev
 #   databricks bundle deploy -t dev
 #   databricks bundle run -t dev demanda_pipeline
+#   databricks bundle run -t dev demanda_pipeline --params aceptar_drift=2027-01-11   # sigue con un drift ya revisado
 #
 # Sin host ni token: salen del perfil de `databricks configure` en local y de los secrets en CI.
 # El bundle solo declara el job. Los schemas, volúmenes, tablas y el modelo de Unity Catalog no son recursos del
@@ -13,10 +14,11 @@ variables:
   schema:
     description: Schema con el Volume raw y las tablas. No tiene valor por defecto, así que cada target fija el suyo.
 
-# data/, .certs/ y .claude/ no se suben porque están en .gitignore
+# data/, .certs/ y .claude/ no se suben porque están en .gitignore; tests/ y scripts/ solo corren en local
 sync:
   exclude:
     - tests/**
+    - scripts/**
 
 resources:
   jobs:
@@ -37,6 +39,10 @@ resources:
             environment_version: "2"  # Python 3.11, como la imagen de Docker
             dependencies:
               - "-r ${workspace.file_path}/requirements.txt"
+      # la fecha del origen cuyo cambio extremo en los datos ya se revisó y es legítimo; vacío en cada corrida normal
+      parameters:
+        - name: aceptar_drift
+          default: ""
       tasks:
         # ingest publica bronze_version como task value y train la lee con este task_key
         - task_key: ingest
@@ -51,9 +57,18 @@ resources:
           spark_python_task:
             python_file: src/features.py
             parameters: ["--schema", "${var.schema}"]
-        - task_key: train
+        # con un cambio extremo en los datos falla antes de train: no se gasta el entrenamiento ni se registra un
+        # champion entrenado con datos rotos, salvo que aceptar_drift traiga la fecha de este origen
+        - task_key: monitoreo_datos
           depends_on:
             - task_key: features
+          environment_key: default
+          spark_python_task:
+            python_file: src/monitoreo_datos.py
+            parameters: ["--schema", "${var.schema}", "--aceptar-drift", "{{job.parameters.aceptar_drift}}"]
+        - task_key: train
+          depends_on:
+            - task_key: monitoreo_datos
           environment_key: default
           spark_python_task:
             python_file: src/train.py
@@ -72,6 +87,14 @@ resources:
           environment_key: default
           spark_python_task:
             python_file: src/export_results.py
+            parameters: ["--schema", "${var.schema}"]
+        # al final: no depende de esta corrida, nunca detiene el job y, si falla, results.json ya quedó
+        - task_key: monitoreo_desempeno
+          depends_on:
+            - task_key: export
+          environment_key: default
+          spark_python_task:
+            python_file: src/monitoreo_desempeno.py
             parameters: ["--schema", "${var.schema}"]
 
 targets:

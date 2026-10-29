@@ -15,13 +15,15 @@ La estructura del repositorio, los datos y las decisiones de modelado están en 
 make build   # construye la imagen tesis-mlops con requirements.txt y requirements-dev.txt
 make lint    # ruff check sobre el repo
 make test    # pytest
+make calibrar-drift      # PSI, nulos y cobertura de los orígenes históricos con data/, sin entrenar
+make simular-monitoreo   # los 8 orígenes del backtest como corridas en vivo: drift contra error (unos 40 min)
 ```
 
 `lint` y `test` reconstruyen la imagen si cambiaron los requirements y montan el repo en `/app`, así que los cambios de código no requieren rebuild.
 
 ## Databricks
 
-El job `demanda_pipeline` (ingest → features → train → predict → export) se define en [databricks.yml](databricks.yml) como Asset Bundle, con los targets `dev` (schema `tesis_dev`, por defecto) y `prod` (schema `tesis`). La conexión sale del perfil de `databricks configure`.
+El job `demanda_pipeline` (ingest → features → monitoreo_datos → train → predict → export → monitoreo_desempeno) se define en [databricks.yml](databricks.yml) como Asset Bundle, con los targets `dev` (schema `tesis_dev`, por defecto) y `prod` (schema `tesis`). La conexión sale del perfil de `databricks configure`.
 
 ```
 databricks bundle validate -t dev
