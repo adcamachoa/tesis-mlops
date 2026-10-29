@@ -9,8 +9,9 @@ rearmarlos, junto con las predicciones del backtest de la demostración. Solo im
 de variables: nunca piezas.
 
 La demostración muestra primero las 8 corridas con la regla de la fase 8b (las tres ventanas juntas) y después con la
-de la fase 9b: cada ventana medida apenas cierra, cuánto antes llega cada alerta, en qué lunes habría adelantado el
-reentrenamiento y si el pronóstico adelantado habría tenido menos error que el vigente.
+de la fase 9b: cada ventana medida apenas cierra y cuánto antes llega cada alerta. Al final, la evidencia de por qué
+una alerta no adelanta el reentrenamiento: en qué lunes lo habría adelantado y si el pronóstico adelantado habría
+tenido menos error que el vigente.
 """
 import argparse
 import itertools
@@ -419,8 +420,22 @@ def medir_por_ventana(ventanas: pd.DataFrame, por_origen: pd.DataFrame, vivos, d
     return medidas
 
 
+def alerta_posterior(medidas: pd.DataFrame, ultimo: pd.Timestamp) -> str | None:
+    """La regla que se descartó el 29-oct-2026 (ver CLAUDE.md): una medición con alerta que cerró después del
+    datos_hasta del último pronóstico adelantaba el reentrenamiento. Devuelve el motivo del disparo, o None. De cada
+    origen y medición cuenta su última corrida."""
+    ultimas = medidas.sort_values("fecha_corrida").groupby(["origen", "medicion"]).tail(1)
+    nuevas = ultimas[ultimas["alerta"] & (ultimas["cierre"] > ultimo + pd.Timedelta(days=6))]
+    if nuevas.empty:
+        return None
+    detalle = ", ".join(f"{m.medicion} del origen {m.origen.date()}"
+                        for m in nuevas.sort_values(["origen", "medicion"]).itertuples())
+    return f"alerta de desempeño posterior al origen {ultimo.date()}: {detalle}"
+
+
 def repasar_decisiones(medidas: pd.DataFrame, rejilla: list[pd.Timestamp]) -> pd.DataFrame:
-    """La regla del job (monitoreo.decidir_reentrenamiento), lunes a lunes, sobre la rejilla de 4 semanas de la 8b.
+    """La regla descartada (`alerta_posterior`), lunes a lunes, sobre la rejilla de 4 semanas de la 8b: la evidencia de
+    la decisión de no adelantar el reentrenamiento por una alerta.
 
     La rejilla se mantiene: cada 4 semanas hay un pronóstico, como en la 8b. Un disparo agrega un pronóstico en su
     origen, vigente hasta que entra el del siguiente origen de la rejilla; desde ahí es el último pronóstico, así que la
@@ -437,8 +452,8 @@ def repasar_decisiones(medidas: pd.DataFrame, rejilla: list[pd.Timestamp]) -> pd
             continue
         corrida = origen + pd.Timedelta(weeks=1)
         ultimo = max(o for o in entrenados if o < origen)
-        reentrena, motivo = monitoreo.decidir_reentrenamiento(origen, ultimo, medidas[medidas["mide"] <= corrida])
-        if reentrena:
+        motivo = alerta_posterior(medidas[medidas["mide"] <= corrida], ultimo)
+        if motivo:
             entrenados.append(origen)
             disparos.append({
                 "origen": origen, "corrida": corrida, "motivo": motivo,
@@ -511,8 +526,9 @@ def demo_por_ventana(datos, ventanas, por_origen, vivos, del_rango, tres_ventana
 
     disparos = repasar_decisiones(medidas, list(vivos))
     disparos.to_parquet(GUARDADOS / "demo_disparos.parquet")
-    print(f"\nReentrenamientos adelantados: la regla del job, lunes a lunes, del origen {vivos[0].date()} al "
-          f"{(vivos[-1] + pd.Timedelta(weeks=backtest.CADA - 1)).date()}, sobre la rejilla de 4 semanas de la 8b\n")
+    print(f"\nReentrenamientos que la alerta habría adelantado (regla descartada el 29-oct-2026), lunes a lunes, del "
+          f"origen {vivos[0].date()} al {(vivos[-1] + pd.Timedelta(weeks=backtest.CADA - 1)).date()}, sobre la "
+          f"rejilla de 4 semanas de la 8b\n")
     if disparos.empty:
         print("Ningún disparo: ninguna alerta habría adelantado el reentrenamiento, así que no hay pronóstico "
               "adelantado que comparar.")

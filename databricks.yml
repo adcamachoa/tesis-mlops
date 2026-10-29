@@ -6,8 +6,9 @@
 #   databricks bundle run -t dev demanda_pipeline --params reentrenar=si              # entrena aunque no toque
 #
 # Cada semana: ingest → features → monitoreo_datos → monitoreo_desempeno → toca_reentrenar. Si toca reentrenar (cada 4
-# semanas desde el último origen pronosticado, o antes con una alerta de desempeño nueva), sigue train → predict; si no,
-# el pronóstico publicado no cambia. export corre en las dos ramas y publica la venta real de las semanas nuevas.
+# semanas desde el último origen pronosticado, o a mano con reentrenar=si), sigue train → predict; si no, el pronóstico
+# publicado no cambia. Una alerta de desempeño no adelanta el reentrenamiento: es una señal para revisar el modelo.
+# export corre en las dos ramas y publica la venta real de las semanas nuevas.
 #
 # Sin host ni token: salen del perfil de `databricks configure` en local y de los secrets en CI.
 # El bundle solo declara el job. Los schemas, volúmenes, tablas y el modelo de Unity Catalog no son recursos del
@@ -84,8 +85,8 @@ resources:
           spark_python_task:
             python_file: src/monitoreo_datos.py
             parameters: ["--schema", "${var.schema}", "--aceptar-drift", "{{job.parameters.aceptar_drift}}"]
-        # antes de la condición: una ventana que cierra esta semana con alerta puede adelantar el reentrenamiento.
-        # Publica la decisión como task value reentrenar
+        # mide las ventanas que cerraron; sus alertas quedan en la tabla y el log para revisar el modelo, sin adelantar
+        # el reentrenamiento. Publica la decisión (cada 4 semanas, o reentrenar=si) como task value reentrenar
         - task_key: monitoreo_desempeno
           depends_on:
             - task_key: monitoreo_datos

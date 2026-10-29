@@ -10,8 +10,7 @@ Funciones puras en pandas. Los umbrales están documentados en CLAUDE.md.
   lo acepte para ese origen.
 - Desempeño: mide cada ventana de cada pronóstico en vivo apenas cierra (el mes 1, el mes 2 y, al cerrar el mes 3, el
   total), con el formato estándar, y la compara con el mínimo y el máximo por origen del backtest de la versión que
-  pronosticó. Con eso y el calendario decide si la corrida reentrena: cada 4 semanas, o antes si una alerta trae
-  información que el último pronóstico no conocía.
+  pronosticó. Una alerta es una señal para revisar el modelo: no adelanta el reentrenamiento, que va cada 4 semanas.
 
 Nada de esto lleva piezas: el PSI, la parte de nulos, las coberturas, el WAPE, el MAPE y el sesgo son proporciones.
 """
@@ -58,7 +57,7 @@ MEDICIONES = {
     "mes_2": {"ventana": 2, "alerta": ("wape_m2",), "dato": ("mape_m2", "sesgo_m2")},
     "total": {"ventana": 3, "alerta": ("wape_total", "sesgo_total"), "dato": ("mape_total", "wape_tipo_mes")},
 }
-SEMANAS_REENTRENAMIENTO = 4  # un pronóstico cada 4 semanas, o antes con una alerta nueva
+SEMANAS_REENTRENAMIENTO = 4  # un pronóstico cada 4 semanas; una alerta de desempeño no lo adelanta
 
 
 class DriftExtremo(RuntimeError):
@@ -393,14 +392,15 @@ def leer_reentrenar(texto: str) -> bool:
 
 
 def decidir_reentrenamiento(
-    origen: pd.Timestamp, ultimo_pronostico: pd.Timestamp | None, medidas: pd.DataFrame, forzado: bool = False
+    origen: pd.Timestamp, ultimo_pronostico: pd.Timestamp | None, forzado: bool = False
 ) -> tuple[bool, str]:
-    """Si la corrida de `origen` entrena y pronostica, y por qué.
+    """Si la corrida de `origen` entrena y pronostica, y por qué: cuando pasaron 4 semanas desde el último origen
+    pronosticado, o a mano con reentrenar=si.
 
-    Reentrena cuando pasaron 4 semanas desde el último origen pronosticado, o antes si alguna medición con alerta cerró
-    después del datos_hasta de ese pronóstico: la alerta trae información que el último entrenamiento no conocía. Una
-    alerta que ya conocía no vuelve a disparar, así que no reentrena cada semana mientras no cierre otra ventana.
-    `medidas` trae origen, fecha_corrida, medicion, cierre y alerta; de cada origen cuenta su última corrida.
+    Una alerta de desempeño no lo adelanta (decisión del 29-oct-2026, en CLAUDE.md). Con orígenes cada 4 semanas, cada
+    medición cae 1 semana después de un reentrenamiento programado, así que adelantar solo agregaría 1 semana de
+    datos, y en la demostración no bajó el error. La alerta queda en el log y en la tabla como señal para revisar el
+    modelo.
     """
     if forzado:
         return True, "reentrenar=si"
@@ -409,15 +409,8 @@ def decidir_reentrenamiento(
     semanas = (origen - ultimo_pronostico).days // 7
     if semanas >= SEMANAS_REENTRENAMIENTO:
         return True, f"pasaron {semanas} semanas desde el origen {ultimo_pronostico.date()}"
-    conocido = ultimo_pronostico + pd.Timedelta(days=6)
-    ultimas = _ultimas_corridas(medidas)
-    nuevas = ultimas[ultimas["alerta"].astype(bool) & (pd.to_datetime(ultimas["cierre"]) > conocido)]
-    if len(nuevas):
-        detalle = ", ".join(f"{m.medicion} del origen {pd.Timestamp(m.origen).date()}"
-                            for m in nuevas.sort_values(["origen", "medicion"]).itertuples())
-        return True, f"alerta de desempeño posterior al origen {ultimo_pronostico.date()}: {detalle}"
-    return False, (f"van {semanas} semanas desde el origen {ultimo_pronostico.date()} y ninguna alerta posterior; "
-                   f"toca a las {SEMANAS_REENTRENAMIENTO}")
+    return False, (f"van {semanas} semanas desde el origen {ultimo_pronostico.date()}; toca a las "
+                   f"{SEMANAS_REENTRENAMIENTO}")
 
 
 def _porcentaje(metrica: str, valor: float) -> str:

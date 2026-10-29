@@ -1,4 +1,4 @@
-"""Monitoreo de desempeño: mide cada ventana de los pronósticos apenas cierra, y decide si la corrida reentrena.
+"""Monitoreo de desempeño: mide cada ventana de los pronósticos apenas cierra, y publica si la corrida reentrena.
 
 Se corre en Databricks como spark_python_task, después de monitoreo_datos y antes de la condición toca_reentrenar:
     python src/monitoreo_desempeno.py --schema tesis_dev
@@ -12,9 +12,10 @@ run de MLflow, que se guardó al entrenar. Agrega una fila por corrida × medici
 (common.monitoreo.estados), a una tabla de solo agregar. Para las mediciones que todavía no cierran, imprime cuándo
 cierra la siguiente y el rango con que se medirá.
 
-Al final decide si toca reentrenar (common.monitoreo.decidir_reentrenamiento) y lo publica como task value
-`reentrenar`, que lee la condición toca_reentrenar. Las alertas no detienen el job, y el log no lleva piezas: solo WAPE,
-MAPE, sesgo y fechas.
+Al final decide si toca reentrenar (common.monitoreo.decidir_reentrenamiento: cada 4 semanas desde el último origen
+pronosticado, o con reentrenar=si) y lo publica como task value `reentrenar`, que lee la condición toca_reentrenar. Una
+alerta no detiene el job ni adelanta el reentrenamiento: queda en la tabla y en el log como señal para revisar el
+modelo. El log no lleva piezas: solo WAPE, MAPE, sesgo y fechas.
 """
 import argparse
 import tempfile
@@ -95,19 +96,18 @@ def main():
     cerradas, abiertas = monitoreo.por_medir(corridas, previas, real_hasta)
     print(f"origen {origen.date()}, venta hasta el {real_hasta.date()}: {len(cerradas)} mediciones por hacer y "
           f"{len(abiertas)} con su ventana abierta")
-    todas = previas
     if len(cerradas) or len(abiertas):
-        todas = medir(spark, tabla, semanales, cerradas, abiertas, previas)
+        medir(spark, tabla, semanales, cerradas, abiertas, previas)
 
     ultimo_pronostico = corridas["origen"].max() if len(corridas) else None
-    reentrenar, motivo = monitoreo.decidir_reentrenamiento(origen, ultimo_pronostico, todas, forzado)
+    reentrenar, motivo = monitoreo.decidir_reentrenamiento(origen, ultimo_pronostico, forzado)
     publicar_decision(reentrenar)
     print(f"{'reentrena' if reentrenar else 'no reentrena'}: {motivo}")
 
 
-def medir(spark, tabla, semanales, cerradas, abiertas, previas) -> pd.DataFrame:
+def medir(spark, tabla, semanales, cerradas, abiertas, previas) -> None:
     """Mide las mediciones `cerradas`, las agrega a monitoreo_desempeno e imprime cuándo cierra la siguiente de cada
-    corrida abierta. Devuelve todas las mediciones, las previas y las nuevas."""
+    corrida abierta."""
     venta_diaria = venta_diaria_serie(spark.table(tabla("ventas_bronze")), spark.table(tabla("productos_bronze")))
     venta_diaria = venta_diaria.toPandas()
     venta_diaria["fecha"] = pd.to_datetime(venta_diaria["fecha"])
@@ -125,7 +125,7 @@ def medir(spark, tabla, semanales, cerradas, abiertas, previas) -> pd.DataFrame:
               f"{siguiente.cierre.date()} y se mide en la corrida del {corrida.date()}; rango de su backtest: "
               f"{monitoreo.describir_rango(rangos[int(siguiente.modelo_version)][0])}")
     if cerradas.empty:
-        return previas
+        return
 
     medidas = []
     for medicion in cerradas.itertuples(index=False):
@@ -146,7 +146,9 @@ def medir(spark, tabla, semanales, cerradas, abiertas, previas) -> pd.DataFrame:
     print(f"{destino}: {len(nuevas)} mediciones")
     for _, medida in medidas.iterrows():
         print(f"  corrida {medida['fecha_corrida']}, {monitoreo.describir_medida(medida)}")
-    return todas
+    if medidas["alerta"].any():
+        print(f"{int(medidas['alerta'].sum())} mediciones con alerta: revisar el modelo. La alerta no adelanta el "
+              f"reentrenamiento, que va cada {monitoreo.SEMANAS_REENTRENAMIENTO} semanas")
 
 
 if __name__ == "__main__":

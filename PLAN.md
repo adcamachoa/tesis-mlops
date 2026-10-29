@@ -750,10 +750,11 @@ Fuera de esta fase:
 
 ## Fase 9b. Cadencia semanal y monitoreo por ventana
 
-La tesis decía "un pronóstico cada 4 semanas". Desde esta fase, además:
+La tesis decía "un pronóstico cada 4 semanas", y eso se mantiene. Desde esta fase, además:
 - la venta real publicada se actualiza cada semana;
-- cada ventana del pronóstico se mide apenas cierra;
-- una alerta de desempeño adelanta el reentrenamiento.
+- cada ventana del pronóstico se mide apenas cierra.
+
+La propuesta incluía que una alerta de desempeño adelantara el reentrenamiento. Se descartó el 29-oct-2026, con la evidencia de la demostración (ver "Decisión" al final de la fase).
 
 Se numera 9b para no cambiar las referencias a la fase 10.
 
@@ -818,8 +819,8 @@ Diseño:
   - **Parámetros:** `aceptar_drift`, como antes, y `reentrenar` (vacío o `si`).
 - **Cuándo toca reentrenar** (`monitoreo.decidir_reentrenamiento`):
   - cuando el origen queda 4 semanas o más después del último origen de `predicciones`;
-  - o antes, si alguna medición con alerta cerró después del `datos_hasta` del último pronóstico.
-  - No se usa "la ventana medida más reciente": el 18-ene cierran 3 ventanas el mismo día, y una alerta vieja reentrenaría cada lunes hasta que cerrara otra.
+  - o a mano, con `reentrenar=si`.
+  - Hasta el 29-oct-2026 también reentrenaba antes si alguna medición con alerta cerraba después del `datos_hasta` del último pronóstico. Se descartó (ver "Decisión"). La alerta queda como señal para revisar el modelo.
 - **Freno** (`validation.revisar_semana_nueva`, en `ingest`): el último domingo completo de venta y stock contra el `real_hasta` del último `results.json`.
   - Si `results.json` no trae `real_hasta`, como en la primera corrida, no hay freno.
   - `reentrenar=si` se lo salta.
@@ -881,7 +882,7 @@ Demostración por ventana (después del merge, 29-oct-2026, `make simular-monito
   - **La primera revisión manual llega el 27-jul,** por el mes 2 del 18-may y el mes 1 del 15-jun. Con las tres ventanas llegaba el 24-ago.
   - **El sesgo por mes muestra el sobrepronóstico** del Hot Sale y el verano: +46,6 % en el mes 2 del 20-abr y +43,3 % en el mes 1 del 18-may. El total los mezclaba en +22,1 % y +32,5 %.
   - Los otros 5 orígenes quedan en rango en sus 3 mediciones.
-- **Reentrenamientos adelantados.** Se repasó la regla del job lunes a lunes, del origen 29-dic-2025 al 3-ago-2026, manteniendo la rejilla de 4 semanas de la 8b. Hubo 2 disparos.
+- **Reentrenamientos adelantados.** Se repasó la regla que entonces tenía el job (reentrenar si una alerta cerraba después del `datos_hasta` del último pronóstico), lunes a lunes, del origen 29-dic-2025 al 3-ago-2026, manteniendo la rejilla de 4 semanas de la 8b. Hubo 2 disparos.
   - Cada pronóstico adelantado se entrenó con el mismo corte del backtest: nada después de su origen.
   - Se comparó con el vigente solo en las semanas en que habría estado vigente: desde el disparo hasta que entra el siguiente origen de la rejilla.
 
@@ -900,6 +901,19 @@ Demostración por ventana (después del merge, 29-oct-2026, `make simular-monito
   - No se miden los pronósticos adelantados, solo se comparan en sus semanas vigentes.
   - Un reentrenamiento cuesta unos 36 min de cuota.
 - Entrenar los 2 orígenes adelantados tomó 465 y 289 s en local. Quedaron en `data/_local/`, aparte de los 23 de la 8b.
+
+Decisión (29-oct-2026): **una alerta de desempeño ya no adelanta el reentrenamiento.**
+- Se reentrena solo cada 4 semanas, o a mano con `reentrenar=si`.
+- Se mantiene todo lo demás: la medición por ventana, la alerta, el sesgo por mes y la revisión manual. La alerta queda en el log y en la tabla `monitoreo_desempeno` como señal para revisar el modelo.
+- **Evidencia, de la demostración por ventana:**
+  - **Cada medición cae 1 semana después de un reentrenamiento programado** (mes 1 a las 6 semanas del origen, mes 2 a las 10 y total a las 14), así que adelantar solo agrega 1 semana de datos.
+  - **No bajó el error.** En los 2 disparos, en sus 3 semanas vigentes, el WAPE tipo bajó 1,0 y 3,4 puntos, el WAPE total no cambió y el sesgo empeoró 1,9 y 7,7 puntos.
+  - **Cada disparo cuesta unos 36 minutos de cuota**, lo que tarda train.
+- **En el código.**
+  - `monitoreo.decidir_reentrenamiento` ya no recibe las mediciones.
+  - El log de `monitoreo_desempeno` avisa cuántas mediciones tuvieron alerta y que no adelantan el reentrenamiento.
+  - La regla descartada quedó solo en `scripts/simular_monitoreo.py` (`alerta_posterior`), para reproducir la evidencia.
+- **En prod.** Entra con el merge de este PR, antes de la primera medición real (el mes 1 del 12-oct se mide el 23-nov). Hasta entonces no cierra ninguna ventana, así que la regla anterior no habría disparado.
 
 ---
 
