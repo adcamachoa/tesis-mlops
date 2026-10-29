@@ -789,9 +789,14 @@ Decisiones (29-oct-2026):
 - **Después del merge:** extender la demostración de la 8b a la medición por ventana, sin atrasar el merge.
 
 Manual:
-- [ ] Revisar la prueba en dev antes del merge
-- [ ] Hacer merge del PR y aprobar el despliegue en prod, idealmente antes del lunes 2-nov. Desde ahí, el job corre cada lunes a las 9:00 de Bogotá.
-- [ ] Cada lunes, antes de las 9:00 (Bogotá), subir al Volume de prod (`/Volumes/workspace/tesis/raw/`) los 5 parquet con corte al domingo. Si llegan después, lanzar la corrida a mano: `gh workflow run cd.yml --ref main -f accion=correr`.
+- [x] Revisar la prueba en dev antes del merge
+- [x] Hacer merge del PR y aprobar el despliegue en prod, idealmente antes del lunes 2-nov. Desde ahí, el job corre cada lunes a las 9:00 de Bogotá.
+  - Merge del PR #6 el 29-oct-2026.
+  - Revisado con `jobs get` (solo lectura): el job de prod quedó `UNPAUSED`, los lunes a las 9:00 (`America/Bogota`), con las 8 tareas sobre `tesis`, los parámetros `aceptar_drift` y `reentrenar` vacíos y sin reintento en `ingest` y `monitoreo_datos`.
+  - `jobs list` no muestra los parámetros; para verlos hace falta `jobs get`.
+- [ ] Cada lunes (tarea recurrente): exportar y subir al Volume de prod (`/Volumes/workspace/tesis/raw/`) los 5 parquet con corte al domingo, con un solo comando, entre las 6:45 y las 9:00 de Bogotá.
+  - BigQuery se actualiza a las 6:00 y el catálogo a las 6:30.
+  - Si llegan después de las 9:00, el freno detiene la corrida programada; hay que lanzarla a mano con `gh workflow run cd.yml --ref main -f accion=correr`.
 - [ ] **Hacia el 15-dic-2026, hacer un commit al repo**, por ejemplo con el resultado de la medición del 21-dic. En un repo público, GitHub desactiva el schedule de `pages.yml` después de 60 días sin actividad, y tiene que seguir activo hasta el 18-ene-2027.
 - [ ] PR en `tesis-mlops-web` para usar los campos nuevos: `generar_ejemplo.py` tiene que generarlos (la validación de aquí los exige), y la página puede dibujarlos.
 
@@ -799,7 +804,7 @@ Terminado cuando:
 - [x] `make lint` y `make test` pasan, con las pruebas nuevas
 - [x] La calibración con la corrida anterior 1 semana antes no detiene ningún origen normal
 - [x] En dev, la corrida normal va por la rama sin reentrenar y exporta, la repetida se detiene en el freno y la de `reentrenar=si` va por la rama que entrena
-- [ ] Commit `fase 9b: cadencia semanal y monitoreo por ventana`, por PR
+- [x] Commit `fase 9b: cadencia semanal y monitoreo por ventana`, por PR (#6)
 
 Diseño:
 - **El job** (`databricks.yml`): ingest → features → `monitoreo_datos` → `monitoreo_desempeno` → `toca_reentrenar` → (sí) train → predict → export; (no) export.
@@ -860,6 +865,41 @@ Resultado (29-oct-2026):
     - Por eso `ingest` y `monitoreo_datos` llevan `disable_auto_optimization: true`. En `monitoreo_datos`, un drift extremo repetido escribiría sus revisiones dos veces.
     - Databricks lo aceptó en serverless. En la corrida frenada siguiente, `ingest` corrió una sola vez (intento 0) y la corrida tardó 1,3 min.
   - `predicciones` de dev tiene `appendOnly`, así que la corrida nueva solo se agregó. En la corrida normal, `monitoreo_desempeno` todavía leía las del 12-oct de las 16:28:09 (versión 2) y las 17:47:13 (versión 3). No se volvió a consultar la tabla después.
+
+Demostración por ventana (después del merge, 29-oct-2026, `make simular-monitoreo`, solo en local):
+- **Qué hace.** Mide los 8 orígenes de la demostración de la 8b (29-dic-2025 a 13-jul-2026) con la regla de la 9b, con los mismos pronósticos y rangos.
+  - La tabla de la 8b, con las tres ventanas juntas, sale igual que antes.
+  - Agrega `monitoreo.corrida_de_medicion`, el lunes en que se mide cada ventana. El log de `monitoreo_desempeno` ahora dice cuándo se mide la siguiente.
+- **La alerta llega antes.**
+
+  | Origen | Primera alerta por ventana | Con las tres ventanas | Semanas antes | Revisión manual por ventana |
+  |---|---|---|---|---|
+  | 20-abr-2026 | mes 2 (WAPE M2 58,1 % contra máx. 52,0 %), el 29-jun | 27-jul | 4 | - |
+  | 18-may-2026 | mes 1 (WAPE M1 49,1 % contra máx. 39,2 %), el 29-jun | 24-ago | 8 | mes 2 el 27-jul y total el 24-ago |
+  | 15-jun-2026 | mes 1 (WAPE M1 39,9 % contra máx. 39,2 %), el 27-jul | 21-sep | 8 | mes 1 el 27-jul |
+
+  - **La primera revisión manual llega el 27-jul,** por el mes 2 del 18-may y el mes 1 del 15-jun. Con las tres ventanas llegaba el 24-ago.
+  - **El sesgo por mes muestra el sobrepronóstico** del Hot Sale y el verano: +46,6 % en el mes 2 del 20-abr y +43,3 % en el mes 1 del 18-may. El total los mezclaba en +22,1 % y +32,5 %.
+  - Los otros 5 orígenes quedan en rango en sus 3 mediciones.
+- **Reentrenamientos adelantados.** Se repasó la regla del job lunes a lunes, del origen 29-dic-2025 al 3-ago-2026, manteniendo la rejilla de 4 semanas de la 8b. Hubo 2 disparos.
+  - Cada pronóstico adelantado se entrenó con el mismo corte del backtest: nada después de su origen.
+  - Se comparó con el vigente solo en las semanas en que habría estado vigente: desde el disparo hasta que entra el siguiente origen de la rejilla.
+
+  | Corrida | Origen adelantado | Por | Semanas | Vigente | WAPE tipo, adelantado / vigente | WAPE total | Sesgo |
+  |---|---|---|---|---|---|---|---|
+  | 29-jun | 22-jun | mes 2 del 20-abr y mes 1 del 18-may | 29-jun a 13-jul (3) | 15-jun | 52,4 % / 53,4 % | 26,8 % / 27,0 % | +9,4 % / +7,5 % |
+  | 27-jul | 20-jul | total del 20-abr, mes 2 del 18-may y mes 1 del 15-jun | 27-jul a 10-ago (3) | 13-jul | 40,2 % / 43,6 % | 8,4 % / 8,6 % | −8,4 % / −0,7 % |
+
+- **Un hallazgo estructural: el adelanto siempre cae 1 semana después del reentrenamiento programado.**
+  - Con orígenes cada 4 semanas y ventanas de 31, 30 y 30 días, el mes 1 se mide 6 semanas después de su origen, el mes 2 a las 10 y el total a las 14.
+  - Todas caen 1 semana después de una corrida de la rejilla. Un reentrenamiento por alerta le agrega una sola semana de datos al modelo que se acaba de entrenar.
+  - En los 2 casos, el WAPE tipo bajó 1,0 y 3,4 puntos, el total casi no cambió, y el sesgo empeoró 1,9 y 7,7 puntos.
+  - **Con 2 casos de 3 semanas no hay evidencia de que adelantar ayude.** El valor de medir por ventana está en saber antes (4 a 8 semanas) que el modelo dejó de acertar, para revisarlo, más que en el reentrenamiento adelantado.
+- **Limitaciones.**
+  - En el job, después de un disparo las 4 semanas se cuentan desde ese origen, así que la rejilla se correría 1 semana. El repaso la mantiene fija.
+  - No se miden los pronósticos adelantados, solo se comparan en sus semanas vigentes.
+  - Un reentrenamiento cuesta unos 36 min de cuota.
+- Entrenar los 2 orígenes adelantados tomó 465 y 289 s en local. Quedaron en `data/_local/`, aparte de los 23 de la 8b.
 
 ---
 

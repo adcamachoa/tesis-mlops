@@ -120,8 +120,9 @@ def medir(spark, tabla, semanales, cerradas, abiertas, previas) -> pd.DataFrame:
 
     siguientes = abiertas.sort_values("cierre").drop_duplicates(["fecha_corrida", "origen"])
     for siguiente in siguientes.itertuples(index=False):
+        corrida = monitoreo.corrida_de_medicion(siguiente.origen, siguiente.medicion)
         print(f"origen {siguiente.origen.date()} (versión {siguiente.modelo_version}): {siguiente.medicion} cierra el "
-              f"{siguiente.cierre.date()}; rango de su backtest: "
+              f"{siguiente.cierre.date()} y se mide en la corrida del {corrida.date()}; rango de su backtest: "
               f"{monitoreo.describir_rango(rangos[int(siguiente.modelo_version)][0])}")
     if cerradas.empty:
         return previas

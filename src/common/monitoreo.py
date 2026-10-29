@@ -317,6 +317,13 @@ def cierre(origen: pd.Timestamp, medicion: str) -> pd.Timestamp:
     return fechas_ventanas(origen)[MEDICIONES[medicion]["ventana"] - 1][1]
 
 
+def corrida_de_medicion(origen: pd.Timestamp, medicion: str) -> pd.Timestamp:
+    """El lunes de la corrida semanal que hace `medicion`: la primera cuya venta (hasta el domingo anterior) llega al
+    cierre de su ventana."""
+    fin = cierre(origen, medicion)
+    return fin + pd.Timedelta(days=7 - fin.dayofweek)
+
+
 def por_medir(
     corridas: pd.DataFrame, medidas: pd.DataFrame, real_hasta: pd.Timestamp
 ) -> tuple[pd.DataFrame, pd.DataFrame]:

@@ -28,7 +28,7 @@ El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer e
 - **Local:** en `data/`, que no se versiona.
 - **En Databricks:** en `/Volumes/workspace/<schema>/raw/`, con `<schema>` = `tesis_dev` o `tesis`.
 - **Corte:** datos hasta el domingo 18-oct-2026 (`data/_extraccion.json`). Los volúmenes son reales; lo anonimizado son los identificadores.
-- **Carga semanal en prod.** Cada lunes, antes de las 9:00 de Bogotá, se suben al Volume de prod los 5 parquet con corte al domingo.
+- **Carga semanal en prod.** Cada lunes, entre las 6:45 y las 9:00 de Bogotá, se exportan y suben al Volume de prod los 5 parquet con corte al domingo, con un solo comando. BigQuery se actualiza a las 6:00 y el catálogo a las 6:30.
   - Vienen de una exportación nueva que reutiliza la llave: los códigos existentes no cambian y solo se agregan los SKU nuevos.
   - `local` y `tesis_dev` se quedan con el corte del 18-oct.
 
@@ -226,6 +226,9 @@ Los umbrales se fijaron el 28-oct-2026, antes de ver resultados en vivo, con la 
     - Se compara la misma medición y no dos seguidas cualquiera: el mes 1 y el mes 2 de un pronóstico vienen del mismo modelo y el mismo origen, así que un solo pronóstico malo pediría revisión.
     - Si el modelo está igual de bien que en el backtest, una alerta de mes tiene probabilidad de cerca de 1/9 (quedar arriba del peor de 8 orígenes), y dos seguidas, de cerca de 1/81.
   - Las alertas no detienen el job, pero adelantan el reentrenamiento (ver "Cadencia").
+  - **En la demostración** (`make simular-monitoreo`, 8 orígenes de dic-2025 a jul-2026), la alerta llegó 4 a 8 semanas antes que con las tres ventanas juntas, y la primera revisión manual 4 semanas antes. El detalle está en la fase 9b de PLAN.md.
+  - **Con orígenes cada 4 semanas, toda medición cae 1 semana después de un reentrenamiento programado:** el mes 1 a las 6 semanas del origen, el mes 2 a las 10 y el total a las 14. Un reentrenamiento por alerta le agrega una sola semana de datos al modelo recién entrenado.
+    - En la demostración hubo 2 disparos: el WAPE tipo bajó 1,0 y 3,4 puntos y el sesgo empeoró. Con tan pocos casos no hay evidencia de que adelantar ayude.
 - **Sin reentrenamiento por drift de datos.** Un drift extremo de datos detiene el job, no reentrena.
 - **Las tablas de monitoreo no guardan piezas,** ni el log las muestra: solo PSI, proporciones, fechas y nombres de variables.
 

@@ -7,6 +7,10 @@ Arma la base de features, el panel semanal y la venta diaria por serie con el mi
 semana × SKU de src/features.py corre en Spark local y el resto con common.features. Los guarda en data/_local/ para no
 rearmarlos, junto con las predicciones del backtest de la demostración. Solo imprime PSI, porcentajes, fechas y nombres
 de variables: nunca piezas.
+
+La demostración muestra primero las 8 corridas con la regla de la fase 8b (las tres ventanas juntas) y después con la
+de la fase 9b: cada ventana medida apenas cierra, cuánto antes llega cada alerta, en qué lunes habría adelantado el
+reentrenamiento y si el pronóstico adelantado habría tenido menos error que el vigente.
 """
 import argparse
 import itertools
@@ -379,6 +383,157 @@ def demo(datos: dict[str, pd.DataFrame]) -> None:
     print(f"\nPuesto de las variables monitoreadas por ganancia del champion (de {len(importancia)} variables, "
           f"entrenado hasta {todos[-1].date()}): " + ", ".join(f"{v} {puestos[v]}" for v in monitoreo.VARIABLES))
     print("Las 10 primeras: " + ", ".join(importancia.index[:10]))
+
+    demo_por_ventana(datos, ventanas, por_origen, vivos, del_rango, medidas)
+
+
+def predicciones_adelantadas(base: pd.DataFrame, origenes: list[pd.Timestamp]) -> pd.DataFrame:
+    """Las predicciones del algoritmo del champion en orígenes fuera de la rejilla de 4 semanas, entrenado hasta cada
+    uno como en backtest.correr: nada con semana objetivo posterior al origen. Quedan en data/_local/, aparte de las del
+    backtest, y solo se entrenan los orígenes que falten."""
+    ruta = GUARDADOS / f"adelantados_{CHAMPION}.parquet"
+    guardado = pd.read_parquet(ruta) if ruta.exists() else None
+    faltan = [o for o in origenes if guardado is None or o not in set(guardado["origen"])]
+    if faltan:
+        nuevas = backtest.correr({CHAMPION: modelos.modelos()[CHAMPION]}, base, faltan)
+        nuevas["serie"] = nuevas["serie"].astype(str)
+        guardado = nuevas if guardado is None else pd.concat([guardado, nuevas], ignore_index=True)
+        guardado.to_parquet(ruta)
+    return guardado[guardado["origen"].isin(origenes)]
+
+
+def medir_por_ventana(ventanas: pd.DataFrame, por_origen: pd.DataFrame, vivos, del_rango) -> pd.DataFrame:
+    """Las 8 corridas en vivo con la regla de la fase 9b: una fila por origen × medición, con el lunes en que se habría
+    medido (`mide`), sus métricas, la alerta y el estado, con el mismo código del job."""
+    filas = []
+    for o in vivos:
+        rango = monitoreo.rango_backtest(por_origen.loc[del_rango[o]])
+        del_origen = ventanas[ventanas["origen"] == o]
+        for m in monitoreo.MEDICIONES:
+            filas.append(monitoreo.evaluar(del_origen, rango, m) | {
+                "origen": o, "fecha_corrida": o, "cierre": monitoreo.cierre(o, m),
+                "mide": monitoreo.corrida_de_medicion(o, m),
+            })
+    medidas = pd.DataFrame(filas)
+    medidas["estado"] = monitoreo.estados(medidas)
+    return medidas
+
+
+def repasar_decisiones(medidas: pd.DataFrame, rejilla: list[pd.Timestamp]) -> pd.DataFrame:
+    """La regla del job (monitoreo.decidir_reentrenamiento), lunes a lunes, sobre la rejilla de 4 semanas de la 8b.
+
+    La rejilla se mantiene: cada 4 semanas hay un pronóstico, como en la 8b. Un disparo agrega un pronóstico en su
+    origen, vigente hasta que entra el del siguiente origen de la rejilla; desde ahí es el último pronóstico, así que la
+    misma alerta no vuelve a disparar. Solo cuentan las mediciones de la rejilla: las de los pronósticos adelantados no
+    se simulan. Se repasan los orígenes hasta el que sigue al último de la rejilla. Devuelve una fila por disparo, con
+    su origen, su corrida, el motivo y los orígenes de la rejilla anterior y siguiente.
+    """
+    rejilla = sorted(rejilla)
+    fin = rejilla[-1] + pd.Timedelta(weeks=backtest.CADA)
+    entrenados, disparos = [rejilla[0]], []
+    for origen in pd.date_range(rejilla[0] + pd.Timedelta(weeks=1), fin - pd.Timedelta(weeks=1), freq="7D"):
+        if origen in rejilla:
+            entrenados.append(origen)
+            continue
+        corrida = origen + pd.Timedelta(weeks=1)
+        ultimo = max(o for o in entrenados if o < origen)
+        reentrena, motivo = monitoreo.decidir_reentrenamiento(origen, ultimo, medidas[medidas["mide"] <= corrida])
+        if reentrena:
+            entrenados.append(origen)
+            disparos.append({
+                "origen": origen, "corrida": corrida, "motivo": motivo,
+                "anterior": max(o for o in rejilla if o < origen),
+                "siguiente": min((o for o in rejilla if o > origen), default=fin),
+            })
+    return pd.DataFrame(disparos, columns=["origen", "corrida", "motivo", "anterior", "siguiente"])
+
+
+def error_semanal(panel: pd.DataFrame, predicciones: pd.DataFrame, semanas: pd.DatetimeIndex) -> dict[str, float]:
+    """WAPE a nivel tipo de producto (serie × semana) y del total (por semana), y sesgo, en `semanas`. Una serie sin
+    pronóstico cuenta con 0 y una sin venta con venta 0, como en la métrica del backtest."""
+    real = panel[panel["semana"].isin(semanas)].groupby(["serie", "semana"])["venta"].sum()
+    del_periodo = predicciones[predicciones["semana_objetivo"].isin(semanas)]
+    pronostico = del_periodo.groupby([del_periodo["serie"].astype(str), "semana_objetivo"])["pronostico"].sum()
+    pronostico.index.names = ["serie", "semana"]
+    juntas = pd.concat([real.rename("real"), pronostico.rename("pronostico")], axis=1).fillna(0)
+    total = juntas.groupby(level="semana").sum()
+    return {
+        "wape_tipo": metrics.wape(juntas["real"], juntas["pronostico"]),
+        "wape_total": metrics.wape(total["real"], total["pronostico"]),
+        "sesgo": metrics.sesgo(juntas["real"], juntas["pronostico"]),
+    }
+
+
+def _metricas_de(fila, nombres) -> str:
+    return ", ".join(
+        f"{m} {fila[m]:+.1%}" if m.startswith("sesgo") else f"{m} {fila[m]:.1%}" for m in nombres if pd.notna(fila[m])
+    )
+
+
+def demo_por_ventana(datos, ventanas, por_origen, vivos, del_rango, tres_ventanas: pd.DataFrame) -> None:
+    """Las 8 corridas con la medición por ventana de la fase 9b, comparadas con la regla de las tres ventanas."""
+    medidas = medir_por_ventana(ventanas, por_origen, vivos, del_rango)
+    medidas.to_parquet(GUARDADOS / "demo_ventanas.parquet")
+    print("\nMedición por ventana (fase 9b): cada ventana en la corrida siguiente a su cierre, contra el rango de su "
+          "backtest\n")
+    print(_tabla(pd.DataFrame({
+        "origen": medidas["origen"].dt.date.astype(str),
+        "medición": medidas["medicion"],
+        "se mide": medidas["mide"].dt.date.astype(str),
+        "alerta con": [
+            ", ".join(f"{_metricas_de(f, [m])} (backtest {f[f'{m}_min']:+.1%} a {f[f'{m}_max']:+.1%})"
+                      if m.startswith("sesgo") else f"{_metricas_de(f, [m])} (máx. {f[f'{m}_max']:.1%})"
+                      for m in monitoreo.MEDICIONES[f["medicion"]]["alerta"])
+            for _, f in medidas.iterrows()
+        ],
+        "dato": [_metricas_de(f, monitoreo.MEDICIONES[f["medicion"]]["dato"]) for _, f in medidas.iterrows()],
+        "fuera": medidas["fuera_de_rango"].replace("", "-"),
+        "estado": medidas["estado"],
+    })))
+
+    print("\n¿Cuánto antes llega cada alerta? Primera medición con alerta contra la regla de las tres ventanas:\n")
+    con_alerta = medidas[medidas["alerta"]].sort_values("mide").drop_duplicates("origen")
+    viejo = tres_ventanas.set_index("origen")
+    print(_tabla(pd.DataFrame({
+        "origen": con_alerta["origen"].dt.date.astype(str),
+        "por ventana": [f"{f.medicion}, {f.mide.date()}" for f in con_alerta.itertuples()],
+        "con las tres": [f"{monitoreo.corrida_de_medicion(o, 'total').date()}" for o in con_alerta["origen"]],
+        "semanas antes": [(monitoreo.corrida_de_medicion(o, "total") - m).days // 7
+                          for o, m in zip(con_alerta["origen"], con_alerta["mide"], strict=True)],
+        "estado con las tres": [viejo.loc[o, "estado"] for o in con_alerta["origen"]],
+        "revisión manual por ventana": [
+            ", ".join(f"{m} ({d.date()})" for m, d in medidas.loc[
+                (medidas["origen"] == o) & (medidas["estado"] == "revisión manual"), ["medicion", "mide"]
+            ].itertuples(index=False, name=None)) or "-"
+            for o in con_alerta["origen"]
+        ],
+    })))
+
+    disparos = repasar_decisiones(medidas, list(vivos))
+    disparos.to_parquet(GUARDADOS / "demo_disparos.parquet")
+    print(f"\nReentrenamientos adelantados: la regla del job, lunes a lunes, del origen {vivos[0].date()} al "
+          f"{(vivos[-1] + pd.Timedelta(weeks=backtest.CADA - 1)).date()}, sobre la rejilla de 4 semanas de la 8b\n")
+    if disparos.empty:
+        print("Ningún disparo: ninguna alerta habría adelantado el reentrenamiento, así que no hay pronóstico "
+              "adelantado que comparar.")
+        return
+    adelantadas = predicciones_adelantadas(datos["features"], list(disparos["origen"]))
+    de_la_rejilla = backtest_local(datos["features"], list(vivos))[0]
+    filas = []
+    for d in disparos.itertuples():
+        # vigente desde la semana siguiente al disparo hasta la del siguiente origen de la rejilla, que entra después
+        semanas = pd.date_range(d.origen + pd.Timedelta(weeks=1), d.siguiente, freq="7D")
+        nuevo = error_semanal(datos["panel_semanal"], adelantadas[adelantadas["origen"] == d.origen], semanas)
+        vigente = error_semanal(datos["panel_semanal"], de_la_rejilla[de_la_rejilla["origen"] == d.anterior], semanas)
+        filas.append({
+            "corrida": f"{d.corrida.date()}", "origen adelantado": f"{d.origen.date()}", "motivo": d.motivo,
+            "semanas": f"{semanas[0].date()} a {semanas[-1].date()} ({len(semanas)})",
+            "vigente (rejilla)": f"{d.anterior.date()}",
+            **{f"{nombre} adelantado / vigente": f"{nuevo[m]:{formato}} / {vigente[m]:{formato}}"
+               for nombre, m, formato in (("WAPE tipo", "wape_tipo", ".1%"), ("WAPE total", "wape_total", ".1%"),
+                                          ("sesgo", "sesgo", "+.1%"))},
+        })
+    print(_tabla(pd.DataFrame(filas)))
 
 
 def main():

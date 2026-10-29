@@ -327,6 +327,26 @@ def test_cada_ventana_se_mide_en_la_corrida_siguiente_a_su_cierre():
         ("2026-11-09", "mes_1"), ("2026-11-09", "mes_2"), ("2026-12-07", "mes_1")}
 
 
+def test_la_corrida_que_hace_cada_medicion():
+    """El lunes siguiente al domingo de la semana en que cierra la ventana, que es la misma fecha en que por_medir la
+    deja pasar."""
+    origenes = pd.to_datetime(["2026-10-12", "2026-11-09", "2026-12-07"])
+    esperadas = {
+        ("2026-10-12", "mes_1"): "2026-11-23", ("2026-10-12", "mes_2"): "2026-12-21",
+        ("2026-10-12", "total"): "2027-01-18", ("2026-11-09", "mes_1"): "2026-12-21",
+        ("2026-11-09", "mes_2"): "2027-01-18", ("2026-12-07", "mes_1"): "2027-01-18",
+    }
+    for (origen, medicion), lunes in esperadas.items():
+        assert monitoreo.corrida_de_medicion(pd.Timestamp(origen), medicion) == pd.Timestamp(lunes)
+    # cuadra con por_medir: el domingo anterior todavía no la mide, el lunes sí
+    corridas = pd.DataFrame({"fecha_corrida": origenes + pd.Timedelta(days=8), "origen": origenes})
+    for o in origenes:
+        for m in monitoreo.MEDICIONES:
+            lunes = monitoreo.corrida_de_medicion(o, m)
+            assert (f"{o.date()}", m) in _medido_en(corridas, f"{(lunes - pd.Timedelta(days=1)).date()}")
+            assert (f"{o.date()}", m) not in _medido_en(corridas, f"{(lunes - pd.Timedelta(days=8)).date()}")
+
+
 def test_lo_ya_medido_no_se_vuelve_a_medir():
     corridas = pd.DataFrame({"fecha_corrida": pd.to_datetime(["2026-10-28 16:28", "2026-10-28 17:47"]),
                              "origen": pd.to_datetime(["2026-10-12", "2026-10-12"])})
