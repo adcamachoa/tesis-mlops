@@ -308,8 +308,8 @@ def _nodos(resultados: dict) -> dict[str, dict]:
 
 
 def test_el_arbol_publica_lo_que_llega_al_minimo(tablas, resultados):
-    """La serie que dejó de vender no llega al mínimo ni con su historia ni con su pronóstico; su resto tampoco, así
-    que no hay "otras" y queda solo dentro de su categoría."""
+    """La serie que dejó de vender (Tipo 4) no llega al mínimo. Su resto tampoco, así que se junta con su única
+    hermana publicada (Tipo 3): Cat 2 no se desglosa, y sus hijos nunca dejan un resto que se pueda derivar."""
     assert [(n["id"], n["padre"], n["nivel"]) for n in resultados["series"]] == [
         ("total", None, "total"),
         ("submarca-a", "total", "submarca"),
@@ -320,24 +320,13 @@ def test_el_arbol_publica_lo_que_llega_al_minimo(tablas, resultados):
         ("submarca-b", "total", "submarca"),
         ("submarca-b/depto-2", "submarca-b", "departamento"),
         ("submarca-b/depto-2/cat-2", "submarca-b/depto-2", "categoria"),
-        ("submarca-b/depto-2/cat-2/tipo-3", "submarca-b/depto-2/cat-2", "serie"),
     ]
     nodos = _nodos(resultados)
     assert (nodos["submarca-b/depto-2"]["nombre"], nodos["submarca-b/depto-2"]["etiqueta"]) == (
         "Submarca B | Depto 2", "Depto 2")
     # las series se llaman como su clave, igual que en la versión 1
-    series = sorted(n["nombre"] for n in resultados["series"] if n["nivel"] == "serie")
-    assert series == sorted(_del_origen(tablas["predicciones"], resultados)["serie"].unique())
-    # con un mínimo entre el peso de la serie más grande de Cat 1 y el de Cat 1, Cat 1 se publica sin desglose: sus
-    # dos series juntas suman la categoría entera, así que tampoco hay "otras"
-    def peso(nodo: dict) -> float:
-        return max(np.mean(nodo["real"]), np.mean(nodo["pronostico"]))
-
-    tipos = [peso(nodos[f"submarca-a/depto-1/cat-1/tipo-{i}"]) for i in (1, 2)]
-    minimo = (max(tipos) + peso(nodos["submarca-a/depto-1/cat-1"])) / 2
-    alto = _nodos(_publicar(tablas, minimo=minimo)[1][tablas["nuevo"]])
-    assert "submarca-a/depto-1/cat-1" in alto
-    assert not [i for i in alto if i.startswith("submarca-a/depto-1/cat-1/")]
+    series = [n["nombre"] for n in resultados["series"] if n["nivel"] == "serie"]
+    assert sorted(series) == ["Submarca A | Depto 1 | Cat 1 | Tipo 1", "Submarca A | Depto 1 | Cat 1 | Tipo 2"]
 
 
 def test_cada_nodo_suma_a_sus_hijos(resultados):
@@ -411,7 +400,11 @@ CAMBIOS = {
     "nodo bajo el mínimo": (lambda r: r["series"][-1].update(real=[0.1] * len(r["series"][-1]["real"]),
                                                             pronostico=[0.1] * 13), "no llega al índice mínimo"),
     "hijos que suman más": (lambda r: r["series"][-1].update(real=[v + 50 for v in r["series"][-1]["real"]]),
-                            "suman más que el nodo en real"),
+                            "no suman el nodo en real"),
+    # restar los hijos al padre dejaría ver lo que no se publicó
+    "hijos que suman menos": (lambda r: r["series"][4]["real"].__setitem__(0, 0.0), "no suman el nodo en real"),
+    "venta del horizonte que no cuadra": (lambda r: r["series"][4]["real_horizonte"].__setitem__(0, 0.0),
+                                          "no suman el nodo en real_horizonte"),
     "métricas de otros modelos": (lambda r: r["series"][3]["metricas"].pop(), "mismos modelos"),
 }
 

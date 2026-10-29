@@ -2,8 +2,13 @@
 
 Funciones puras en pandas. Un nodo se publica si se publicó su padre y su peso llega al mínimo: el índice promedio
 semanal de su venta real en las 52 semanas hasta el origen. Con 1 decimal de índice, un nodo más chico quedaría casi
-siempre en 0,0, y sus valores de 1 a 3 piezas dejarían ver el escalón de una pieza. Los hijos que no llegan van juntos
-a un nodo `otras` de su padre, si su suma llega al mínimo; si no, quedan solo dentro del total del padre.
+siempre en 0,0, y sus valores de 1 a 3 piezas dejarían ver el escalón de una pieza.
+
+Los hijos de un nodo desglosado siempre suman el nodo: si no, la diferencia entre el padre y sus hijos dejaría ver lo
+que no se publicó (en el 12-oct-2026, 26 restos así subían de 0,45 % a 3,12 % los valores de 1 a 3 piezas). Los hijos
+que no llegan van juntos a un nodo `otras`. Si su suma no llega al mínimo, se les junta el hijo publicado más chico,
+con todo lo suyo; si así no queda ningún otro hijo, el nodo no se desglosa. Es así aunque el resto no haya vendido:
+el árbol de un origen no cambia cuando llegan semanas nuevas.
 
 No se publica por el pronóstico (lo nuevo o de temporada sin historia): en el origen 12-oct-2026 agregaba 32 nodos, casi
 todos justo debajo del mínimo, y subía de 0,45 % a 2,24 % los valores publicados de 1 a 3 piezas (fase 9c de PLAN.md).
@@ -45,7 +50,8 @@ def construir(catalogo: pd.DataFrame, pesos: pd.Series, minimo: float = INDICE_M
 
     `catalogo` trae una fila por serie con su clave (`serie`) y su ruta (las columnas de features.SERIE). `pesos` es el
     índice promedio semanal de la venta real de cada serie; el de un nodo es la suma de sus series, y una serie sin peso
-    cuenta 0. Los hijos de cada nodo van del más pesado al más liviano, con `otras` al final.
+    cuenta 0. Los hijos de cada nodo van del más pesado al más liviano, con `otras` al final, y juntos tienen todas las
+    series del nodo.
     """
     catalogo = catalogo.drop_duplicates("serie").set_index("serie")
     pesos = pesos.reindex(catalogo.index, fill_value=0.0)
@@ -68,11 +74,13 @@ def construir(catalogo: pd.DataFrame, pesos: pd.Series, minimo: float = INDICE_M
                     resto |= series
                     continue
                 publicados.append(Nodo("/".join(map(_id, ruta)), padre.id, nivel, " | ".join(ruta), ruta[-1], series))
-            if not publicados:  # todos los hijos son chicos: el padre no se desglosa
-                continue
             publicados.sort(key=lambda n: -peso(n.series))
+            if resto and peso(resto) < minimo and publicados:
+                resto |= publicados.pop().series  # el más chico, para que "otras" llegue y los hijos sumen el padre
+            if not publicados:  # todo quedaría en "otras": el padre no se desglosa
+                continue
             siguientes += publicados
-            if resto and peso(resto) >= minimo:
+            if resto:
                 identificador = OTRAS if padre.id == "total" else f"{padre.id}/{OTRAS}"
                 publicados.append(Nodo(identificador, padre.id, OTRAS, f"Otras de {padre.nombre}", "Otras",
                                        frozenset(resto)))

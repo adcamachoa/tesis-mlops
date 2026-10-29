@@ -8,8 +8,9 @@ como `semanas.real`, que haya un solo total y que la venta real del total promed
 (`real_horizonte` y `ventanas_real`) traiga valor exactamente en las semanas y ventanas que cerraron hasta
 `real_hasta`, y que el pronóstico anterior cubra las mismas semanas en todas las series. Del árbol revisa que los `id`
 no se repitan, que cada padre exista y sea del nivel anterior, que ningún nodo baje del índice mínimo (por debajo, sus
-valores de 1 a 3 piezas dejarían ver el escalón de una pieza), que los hijos no sumen más que su padre y que cada nodo
-traiga los modelos de `metricas`. La página es pública: la venta y el pronóstico van como índice, nunca en piezas.
+valores de 1 a 3 piezas dejarían ver el escalón de una pieza), que los hijos sumen su padre en cada valor (si no,
+restarlos dejaría ver lo que no se publicó) y que cada nodo traiga los modelos de `metricas`. La página es pública:
+la venta y el pronóstico van como índice, nunca en piezas.
 
 `ESQUEMA_MANIFEST` y `validar_manifest` siguen las reglas de revisarManifest de tesis-mlops-web (docs/js/datos.js): si
 la web cambia sus reglas, se cambian aquí también. `validar_manifest` revisa además que cada entrada tenga su
@@ -253,14 +254,17 @@ def _problemas_del_arbol(resultados: dict) -> list[str]:
                 problemas.append(f"el nodo {nombre} no llega al índice mínimo de {resultados['indice_minimo']}")
         if [m["modelo"] for m in nodo["metricas"]] != modelos:
             problemas.append(f"el nodo {nombre} no trae en metricas los mismos modelos que la raíz")
-    # los hijos no suman más que su padre, salvo el redondeo de cada uno
+    # los hijos suman su padre, salvo el redondeo de cada uno: si no, restarlos dejaría ver lo que no se publicó
     for padre_id, de_padre in hijos.items():
         padre = por_id[padre_id]
         holgura = REDONDEO * (len(de_padre) + 1)
-        for campo in ("real", "pronostico", "ventanas"):
-            sumas = [sum(h[campo][i] for h in de_padre) for i in range(len(padre[campo]))]
-            if any(s > v + holgura for s, v in zip(sumas, padre[campo], strict=True)):
-                problemas.append(f"los hijos de {padre['nombre']} suman más que el nodo en {campo}")
+        for campo in ("real", "real_horizonte", "pronostico", "ventanas", "ventanas_real", "pronostico_anterior"):
+            for i, valor in enumerate(padre[campo]):
+                if valor is None:  # todavía no se conoce: tampoco en los hijos
+                    continue
+                if abs(sum(h[campo][i] for h in de_padre) - valor) > holgura:
+                    problemas.append(f"los hijos de {padre['nombre']} no suman el nodo en {campo}")
+                    break
     return problemas
 
 

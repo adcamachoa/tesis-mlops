@@ -169,9 +169,16 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
     - `nombre`: el completo, como el de las series en la versión 1;
     - `etiqueta`: el del nodo solo.
   - **Qué nodo se publica.** Uno cuyo índice promedio semanal de venta real en las 52 semanas llega a `indice_minimo` (0,5), y cuyo padre se publicó.
-    - Los hijos que no llegan van juntos a un nodo `otras`, si su suma llega; si no, quedan solo dentro del total del padre.
-    - **El mínimo protege la escala.** Con 0,5, el 0,45 % de los valores semanales publicados vienen de 1 a 3 piezas, menos que el 1,9 % de las 20 series de la versión 1. Con 0,2 serían el 3,7 %.
-    - **No se publica por el pronóstico.** En el 12-oct agregaba 32 nodos, casi todos justo debajo del mínimo, y subía la exposición a 2,24 %.
+    - **Los hijos de un nodo desglosado siempre suman el nodo.** Si no, restar los hijos al padre dejaría ver lo que no se publicó.
+      - Los hijos que no llegan van juntos a un nodo `otras`.
+      - Si su suma no llega al mínimo, se les junta el hijo publicado más chico, con todo lo suyo. Si así no queda ningún otro hijo, el nodo no se desglosa.
+      - Es así aunque el resto no haya vendido, para que el árbol de un origen no cambie cuando llegan semanas nuevas.
+    - **El mínimo protege la escala.** En el 12-oct, la exposición se mide como los valores semanales publicados o derivables que vienen de 1 a 3 piezas:
+      - con esta regla, 0,41 %, sin restos derivables, en 118 nodos;
+      - las 20 series de la versión 1 daban 1,9 %;
+      - con un mínimo de 0,2 serían 3,7 %;
+      - con los restos sin juntar, como en la primera versión del PR, 3,12 %;
+      - publicando también por el pronóstico, 2,24 %. Por eso tampoco se publica por el pronóstico.
   - **Las métricas de cada nodo** (`series[].metricas`) son, para los 6 modelos y en el orden de `metricas`:
     - WAPE M1, M2 y total, MAPE M1, M2 y total (como dato) y sesgo total;
     - salen del backtest del train de la versión que pronosticó, con la venta y el pronóstico sumados al nodo por origen y ventana;
@@ -181,7 +188,7 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - **`validar` revisa además:**
     - que los `id` no se repitan y cada padre exista y sea del nivel anterior;
     - que ningún nodo baje del mínimo;
-    - que los hijos no sumen más que su padre;
+    - que los hijos sumen su padre en cada valor, salvo el redondeo;
     - que cada nodo traiga los modelos de `metricas`.
   - **Es la versión 2 porque la página de la versión 1 rechaza los niveles nuevos.** El orden de publicación va en la fase 9c de PLAN.md: primero la web que acepta la 1 y la 2.
 - **La página es pública: nunca lleva piezas.** La venta real y el pronóstico van como índice, donde 100 = la venta semanal promedio del total en las 52 semanas mostradas. El factor es el mismo para todas las series, y el MAE y el RMSE se escalan con él.

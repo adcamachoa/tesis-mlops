@@ -943,6 +943,11 @@ Decisiones (29-oct-2026):
   - Se revisó publicar también por el pronóstico de 13 semanas, para lo nuevo o de temporada. Agregaba 32 nodos (16 series, 12 categorías y 4 "otras"), casi todos con una historia justo debajo del mínimo (0,2 a 0,49), y subía la exposición de 0,45 % a 2,24 %. No era poco, así que no se incluyó.
 - **Versión 2**, porque la página de la versión 1 rechaza los niveles nuevos.
 - **Métricas de los 6 modelos** por nodo.
+- **Los hijos de un nodo desglosado siempre suman el nodo** (29-oct-2026, a pedido, después de la primera versión del PR).
+  - Con el JSON público se puede restar los hijos a su padre semana a semana. Cuando un padre no tenía "otras", esa diferencia era justo lo chico que no se publicó: 26 restos que subían la exposición de 0,45 % a 3,12 %.
+  - Ahora, cuando el resto no llega al mínimo, se junta con el hijo publicado más chico en "otras", con todo lo suyo. Si no queda ningún otro hijo, el nodo no se desglosa.
+  - Se descartó saltarse los restos sin venta: el árbol de un origen podría cambiar si empezaban a vender, y ahorraba solo 8 nodos.
+  - Costo: de 142 a 118 nodos. Se pierden 37 (24 series, 8 categorías, 3 "otras" y 2 departamentos) y entran 13 "otras". La venta visible en nodos de serie baja de 61 % a 35 %; en 12 categorías la única serie publicada se va a "otras", y la categoría, que vale casi lo mismo, sigue publicada.
 
 Manual:
 - [ ] PR en `tesis-mlops-web` que acepte la versión 1 y la 2, y publicarlo. El resumen para la web va al final de esta fase.
@@ -959,7 +964,7 @@ Terminado cuando:
 Diseño:
 - **El árbol** (`src/common/arbol.py`, funciones puras).
   - Se publica un nodo si se publicó su padre y su índice promedio semanal de venta real en las 52 semanas hasta el origen llega a `indice_minimo` (0,5).
-  - Los hijos que no llegan van juntos a un nodo `otras` del padre, si su suma llega; si no, quedan solo dentro del total del padre. Si ningún hijo llega, el padre no se desglosa.
+  - Los hijos que no llegan van juntos a un nodo `otras` del padre. Si su suma no llega al mínimo, se les junta el hijo publicado más chico, con todo lo suyo. Si no queda ningún otro hijo, el padre no se desglosa. Así los hijos siempre suman el padre.
   - **Campos de cada nodo:**
     - `id`: la ruta en minúsculas y guiones, por ejemplo `submarca-a/bebe-nino/conjuntos`, estable entre orígenes;
     - `padre`, `nivel`, `nombre` completo y `etiqueta`.
@@ -975,41 +980,45 @@ Diseño:
 - **Versión 2** (`results_schema.py`):
   - `indice_minimo` en la raíz;
   - en cada nodo, `id`, `padre`, `etiqueta`, `metricas` y los niveles `departamento`, `categoria` y `otras`.
-  - `validar` revisa además los `id` únicos, que cada padre exista y sea del nivel anterior, el mínimo, que los hijos no sumen más que su padre y que cada nodo traiga los modelos de la raíz.
+  - `validar` revisa además los `id` únicos, que cada padre exista y sea del nivel anterior, el mínimo, que los hijos sumen su padre en cada valor (salvo el redondeo) y que cada nodo traiga los modelos de la raíz.
 - **JSON compacto** en los `results.json`: con sangría pesaría el doble. El manifest queda igual.
 - **Constante `ARTEFACTO_BACKTEST`** en train.py, que usan `monitoreo_desempeno` y el export.
 
 Resultado (29-oct-2026):
-- **Pruebas.** `make lint` pasa y `make test` da 178 pruebas en verde.
-  - Las nuevas cubren la poda y los "otras", que el export coincide con las series y su suma, las métricas de un nodo hoja y del total contra cálculos independientes, el backtest faltante y los casos que `validar` rechaza.
+- **Pruebas.** `make lint` pasa y `make test` da 181 pruebas en verde.
+  - Las nuevas cubren la poda y los "otras", que los hijos tengan todas las series de su padre, que el export coincide con las series y su suma, las métricas de un nodo hoja y del total contra cálculos independientes, el backtest faltante y los casos que `validar` rechaza.
 - **Análisis local** con el origen 12-oct-2026. El árbol completo sería de 3 submarcas, 20 departamentos, 173 categorías y 464 series; la serie mediana queda en 0,0 en el 63 % de las semanas.
+  - La exposición son los valores semanales de 1 a 3 piezas, publicados o que se pueden derivar restando los hijos a su padre.
+  - En dev todavía no cerró ninguna semana del horizonte, así que `real_horizonte` no suma valores.
 
-  | Mínimo | Nodos | Valores de 1 a 3 piezas | Peso por origen, compacto |
+  | Regla | Nodos | Valores de 1 a 3 piezas | Peso por origen, compacto |
   |---|---|---|---|
   | 20 series (versión 1) | 24 | 1,9 % | - |
-  | 0,2 | 250 | 3,7 % | ~0,5 MB |
-  | **0,5** | **142** | **0,45 %** | **0,27 MB** |
-  | 0,5 y también por el pronóstico | 170 | 2,24 % | - |
+  | Mínimo 0,2, restos sin juntar | 250 | 3,7 % sin contar lo derivable | ~0,5 MB |
+  | Mínimo 0,5, restos sin juntar (primera versión del PR) | 142 | 0,45 % publicados; 3,12 % con los 26 restos derivables | 0,27 MB |
+  | Mínimo 0,5 y también por el pronóstico | 170 | 2,24 % sin contar lo derivable | - |
+  | **Mínimo 0,5, hijos que suman el padre (la regla final)** | **118** | **0,41 %, sin restos derivables** | **0,22 MB** |
 
-- **Dev** (`bundle deploy -t dev` y `bundle run -t dev demanda_pipeline --only export`, 2,5 min).
+- **Dev** (`bundle deploy -t dev` y `bundle run -t dev demanda_pipeline --only export`, unos 2,5 min cada vez).
   - Encontró los backtests de los 6 modelos de la versión 4 en MLflow.
-  - Publicó 142 nodos: 1 total, 3 submarcas, 16 departamentos, 54 categorías, 49 series y 19 "otras".
-  - `output/datos/`, descargado, pasa la validación. Pesa 0,27 MB (0,04 MB con gzip) y no trae métricas nulas.
-  - **El WAPE baja al subir de nivel.** Mediana del WAPE total del champion: serie 31,3 %, categoría 25,6 %, departamento 21,3 %, submarca 16,9 % y total 14,7 %.
+  - Con la regla final publicó 118 nodos: 1 total, 3 submarcas, 14 departamentos, 46 categorías, 25 series y 29 "otras".
+  - `output/datos/`, descargado, pasa la validación. Pesa 0,22 MB y no trae métricas nulas.
+  - En los 37 padres desglosados, los hijos suman el padre en `real`, salvo el redondeo: la diferencia más grande es de 0,2.
+  - **El WAPE baja al subir de nivel.** Mediana del WAPE total del champion: serie 31,3 %, categoría 26,0 %, departamento 21,3 %, submarca 16,9 % y total 14,7 %.
 
 Para `tesis-mlops-web`:
 - **Leer la versión 2**, y seguir aceptando la 1: `VERSIONES_ESQUEMA = [1, 2]`. Con solo la 1, la página muestra "formato versión 2" en todos los orígenes.
 - **`series` es el árbol, en profundidad:**
   - cada nodo trae `id`, `padre` (nulo en el total), `nivel` (`total`, `submarca`, `departamento`, `categoria`, `serie` u `otras`), `nombre` completo y `etiqueta`;
   - ya no hace falta leer la submarca del nombre.
-- **El desglose de un nodo son sus hijos por `padre`.**
-  - Si los hijos no suman el nodo, lo que falta es un resto sin desglose: lo chico que no llega a `indice_minimo`.
+- **El desglose de un nodo son sus hijos por `padre`, y siempre suman el nodo,** salvo el redondeo a 1 decimal de cada uno.
+  - No hay "resto sin desglose": lo chico va en el hijo `otras`, que puede incluir también un hijo grande, el más chico de los publicados.
   - Un nodo sin hijos no se desglosa.
 - **`series[].metricas`:** la tabla de modelos puede seguir al nodo elegido.
   - Tiene la forma de `metricas`, sin `es_mejor`, `es_champion`, `wape_tipo_mes`, MAE ni RMSE; esos siguen en la `metricas` de la raíz, a nivel tipo de producto.
   - Conviene explicar que el WAPE baja al subir de nivel.
 - **`indice_minimo`:** para una nota de qué no se publica.
-- **El archivo es compacto, de unos 0,3 MB por origen**, y se lee igual.
+- **El archivo es compacto, de unos 0,2 MB por origen**, y se lee igual.
 - **`generar_ejemplo.py`** tiene que armar la versión 2. `validar` la exige, y le sirven `METRICAS_NODO`, `NIVELES` y `OTRAS`.
 
 ---
