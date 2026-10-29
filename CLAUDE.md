@@ -110,6 +110,52 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - **La página es pública: nunca lleva piezas.** La venta real y el pronóstico van como índice, donde 100 = la venta semanal promedio del total en las 52 semanas mostradas. El factor es el mismo para todas las series, y el MAE y el RMSE se escalan con él.
   - El índice va con 1 decimal. Con más decimales, cada pieza se vería como un escalón fijo y se podría reconstruir la escala.
 
+## Monitoreo y drift
+
+Los umbrales se fijaron el 28-oct-2026, antes de ver resultados en vivo, con la calibración histórica de `make calibrar-drift` (137 orígenes semanales de mar-2024 a oct-2026, sin entrenar). **No se cambian después de ver la venta real.** Están en `src/common/monitoreo.py`.
+
+- **Drift de datos.** Lo revisa la tarea `monitoreo_datos`, entre features y train, y lo agrega a la tabla `monitoreo_datos`, de solo agregar, con una fila por corrida × revisión.
+  - **PSI** de cada variable en el origen contra la ventana de entrenamiento del champion, en los deciles de la referencia y sin nulos.
+    - Variables: `rezago_1`, `media_4`, `media_13`, `media_52`, `tendencia`, `crecimiento_anual`, `estilos_color_con_venta_8`, `lanzamientos_8`, `stock_cierre` y `disponibilidad`.
+    - Aviso desde 0,25 y detención desde 1,0.
+    - **`tendencia` es solo un dato**, sin aviso ni detención. Sube después de cada evento y llega a 1,73 en orígenes normales. Sin ella, ningún origen normal pasa de 0,68.
+    - El único origen que se habría detenido es el 24-feb-2025, con 1,72 en `disponibilidad`. Fue una semana después del inicio del stock, así que se comparó contra una sola semana.
+    - Roturas simuladas: una semana sin venta da 5,5; el stock en cero, 8,6; la venta en docenas, de 1,5 a 2,4.
+    - Una semana con las unidades dobladas da de 0,7 a 1,0: queda en aviso, y en detención solo si llega a 1,0.
+    - El stock de solo la mitad de los SKU da de 0,1 a 0,2, así que el PSI no lo ve. Lo detectan las coberturas de SKU con stock.
+  - **Nulos** de cada variable en el origen contra los últimos 13 orígenes de la ventana.
+    - Aviso si la parte de nulos sube 10 puntos o más. El aumento más alto de la historia fue de +7,7 puntos.
+    - Detención si la variable llega 100 % nula y en esos 13 orígenes tenía datos.
+  - **Cobertura** de la semana del origen contra la semana más baja de las 4 anteriores: SKU con stock al cierre (de `panel_semanal`) y filas de venta, es decir, SKU × día con venta.
+    - Aviso en 0,75 o menos y detención en 0,6 o menos.
+    - Se compara con la semana más baja y no con el promedio. Después de un Hot Sale, contra el promedio, las filas de venta bajan hasta 0,25. Contra la más baja, el mínimo de la historia es 0,70 en filas de venta y 0,88 en SKU con stock.
+  - **Cobertura del mes.** Con el refresco mensual llegan 4 o 5 semanas a la vez. Si todas vienen rotas, la cobertura de la semana las compara entre sí y no lo ve; el PSI solo da aviso, con una mediana de 0,27 si todo el mes llega a la mitad.
+    - Por eso cada semana nueva se compara también contra las 4 semanas que ya revisó la corrida anterior, hasta su origen. Cuenta la semana nueva más baja contra la más baja de las revisadas.
+    - Aviso en 0,75 o menos y detención en 0,6 o menos, como en la semana.
+    - **Corrida anterior:** el último origen de `monitoreo_datos` cuya corrida no tuvo extremos o los aceptó, o el último origen de `predicciones`, porque una corrida que se detuvo no pronostica.
+      - En la primera corrida con monitoreo, como la de enero en prod, cuenta el último origen de `predicciones`. Si no hay ninguno, las 4 semanas hasta el origen − 4 semanas.
+    - **SKU con stock del mes:** el mínimo de la historia es 0,81, y 0,76 con la corrida anterior 13 semanas antes, como en enero; en ningún caso hubo aviso.
+    - **Venta entre salidas de stock del mes.** Por semana, las unidades vendidas entre las salidas de stock. Las salidas son, por SKU y día, lo que bajó el stock desde el día anterior.
+      - El conteo de filas de venta no sirve para el mes: la semana previa al Hot Sale cae sola a 0,50, igual que un mes a medias, y contra el año anterior cae a 0,16 porque el Hot Sale cambia de fecha.
+      - Un evento mueve la venta y las salidas a la vez, pero una venta incompleta solo baja la venta.
+      - En la historia, el mínimo es 0,70, con 1 o 2 avisos y ninguna detención con la corrida anterior 4 o 5 semanas antes, y 6 avisos con 13.
+      - Un mes entero a la mitad se detiene en 60 de 69 orígenes; una sola semana a la mitad, en 41.
+      - **Solo vale porque el stock viene de los movimientos del almacén, independiente de la venta.** Si algún día el stock se calculara desde la venta, las dos fallarían juntas y la razón no cambiaría.
+      - Si a una semana nueva le faltan salidas de stock, queda `sin datos` y el log dice que la venta del mes no se verificó. No detiene el job, y `aceptar_drift` no la vuelve estable.
+  - **Corte del stock.** El job se detiene si el stock atrasa el origen una semana o más.
+    - features corta en la última semana completa de las dos tablas. Sin stock reciente no quedan nulos: el origen se queda atrás.
+  - **Liberar el freno.** El job tiene el parámetro `aceptar_drift`, que recibe la fecha del origen.
+    - Solo vale para ese origen y queda anotado en la tabla.
+    - Con el stock atrasado, liberarlo repite el pronóstico desde el mismo origen.
+- **Drift de desempeño.** Lo revisa la tarea `monitoreo_desempeno`, al final del job, y lo agrega a la tabla `monitoreo_desempeno`, de solo agregar, con una fila por corrida de `predicciones` medida.
+  - Cada pronóstico se mide cuando cierra su ventana 3, con el formato estándar.
+  - **Rango:** el mínimo y el máximo por origen en los 8 orígenes del backtest donde se registró la versión que pronosticó. Salen del artefacto `predicciones_backtest.parquet` de su run de MLflow.
+  - **Alerta** si el WAPE del mes 1, del mes 2 o el total queda arriba del máximo, o si el sesgo total queda fuera del rango. El MAPE va solo como referencia.
+  - **Revisión manual** si tienen alerta el origen y el anterior medido. De cada origen cuenta su última corrida.
+  - No detiene el job.
+- **Sin reentrenamiento por drift.** Cada corrida ya reentrena y aplica la regla del champion. Un drift extremo detiene el job, no reentrena.
+- **Las tablas de monitoreo no guardan piezas,** ni el log las muestra: solo PSI, proporciones, fechas y nombres de variables.
+
 ## Ajustes a PLAN.md (28-oct-2026)
 
 Los prompts de las fases 2, 3, 4, 5 y 9 ya están ajustados a estas decisiones:
@@ -133,11 +179,14 @@ Los prompts de las fases 2, 3, 4, 5 y 9 ya están ajustados a estas decisiones:
 src/
   ingest.py            parquet del Volume → tablas bronze (Delta)
   features.py          bronze → tabla de features
+  monitoreo_datos.py   drift de datos del origen → tabla monitoreo_datos; detiene el job si es extremo
   train.py             backtest, MLflow, registro del champion en Unity Catalog
   predict.py           pronóstico con el champion → tabla predicciones
   export_results.py    results.json para la página
+  monitoreo_desempeno.py  error en vivo contra el rango del backtest → tabla monitoreo_desempeno
   common/              funciones puras en pandas, con pruebas
-    validation.py  features.py  metrics.py  backtest.py  modelos.py  results_schema.py
+    validation.py  features.py  metrics.py  backtest.py  modelos.py  results_schema.py  monitoreo.py
+scripts/               solo en local: simular_monitoreo.py (calibración y demostración del monitoreo)
 tests/                 pruebas (pytest) y tests/data/ (muestra.parquet, results.json de ejemplo)
 front/                 template.html y build.py → dist/index.html
 databricks.yml         Asset Bundle: job demanda_pipeline, targets dev y prod

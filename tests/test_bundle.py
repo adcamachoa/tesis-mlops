@@ -1,4 +1,4 @@
-"""Pruebas de databricks.yml: el job encadena las cinco tareas sobre el schema de cada target, y el bundle no declara
+"""Pruebas de databricks.yml: el job encadena las siete tareas sobre el schema de cada target, y el bundle no declara
 nada más que el job, para que deploy y destroy nunca toquen tablas, volúmenes ni el modelo."""
 from pathlib import Path
 
@@ -9,10 +9,13 @@ RAIZ = Path(__file__).resolve().parents[1]
 TAREAS = {
     "ingest": "src/ingest.py",
     "features": "src/features.py",
+    "monitoreo_datos": "src/monitoreo_datos.py",
     "train": "src/train.py",
     "predict": "src/predict.py",
     "export": "src/export_results.py",
+    "monitoreo_desempeno": "src/monitoreo_desempeno.py",
 }
+ACEPTAR = ["--aceptar-drift", "{{job.parameters.aceptar_drift}}"]  # solo en monitoreo_datos
 
 
 @pytest.fixture(scope="module")
@@ -45,8 +48,17 @@ def test_cada_tarea_corre_su_script_sobre_el_schema_del_target(job):
     for tarea in job["tasks"]:
         script = tarea["spark_python_task"]["python_file"]
         assert script == TAREAS[tarea["task_key"]] and (RAIZ / script).is_file()
-        assert tarea["spark_python_task"]["parameters"] == ["--schema", "${var.schema}"]
+        extra = ACEPTAR if tarea["task_key"] == "monitoreo_datos" else []
+        assert tarea["spark_python_task"]["parameters"] == ["--schema", "${var.schema}", *extra]
         assert tarea["environment_key"] in entornos
+
+
+def test_el_drift_se_revisa_antes_de_entrenar_y_nadie_lo_deja_aceptado(job):
+    orden = [t["task_key"] for t in job["tasks"]]
+    assert orden.index("monitoreo_datos") < orden.index("train") < orden.index("predict")
+    assert orden[-1] == "monitoreo_desempeno"
+    # el parámetro existe para liberar un origen a mano; en la configuración siempre va vacío
+    assert job["parameters"] == [{"name": "aceptar_drift", "default": ""}]
 
 
 def test_cada_target_fija_su_schema(bundle):

@@ -409,6 +409,208 @@ Pendiente (opcional):
 
 ---
 
+## Fase 8b. Monitoreo y drift
+
+Va antes del front para que el job ya mida el pronóstico en vivo cuando llegue la venta de enero de 2027. Se numera 8b para no cambiar las referencias a las fases 9 y 10.
+
+Prompt para Claude Code:
+
+```
+Ejecuta la Fase 8b de PLAN.md: monitoreo de drift de datos y de desempeño.
+1. Drift de datos: en cada corrida, PSI de las variables principales del origen
+   contra la ventana de entrenamiento. Con un cambio extremo, el job se detiene
+   antes de pronosticar. Se guarda en una tabla de solo agregar.
+2. Drift de desempeño: para cada pronóstico de predicciones cuyas ventanas ya
+   cerraron, WAPE y sesgo en vivo en el formato estándar, comparados con el rango
+   por origen del backtest. Si se sale del rango, alerta; si se repite en 2
+   orígenes seguidos, revisión manual. Se guarda en una tabla de solo agregar.
+3. Los umbrales se fijan antes de ver resultados en vivo y quedan en CLAUDE.md.
+4. Nada de reentrenamiento automático por drift: cada corrida ya reentrena y
+   aplica la regla del champion.
+5. No cambia results.json ni su esquema.
+6. Demostración en local con Docker sobre los 8 orígenes del backtest, como si
+   fueran en vivo: ¿los orígenes con más drift tuvieron más error?
+7. Rama y PR. El log no muestra piezas.
+Propón el plan primero.
+```
+
+Terminado cuando:
+- [x] `make lint` y `make test` pasan, con las pruebas nuevas de monitoreo
+- [x] La demostración local muestra el drift y el error en vivo de cada origen, y si van juntos
+- [x] Los umbrales quedan en CLAUDE.md antes del merge
+- [x] En dev, las dos tareas nuevas terminan en verde y `predicciones` sigue intacta
+- [ ] Commit `fase 8b: monitoreo y drift`, por PR
+
+Manual:
+- [ ] Revisar la demostración antes del merge. Si el umbral de detención hubiera parado un origen sin datos rotos, se decide antes de enero.
+- [ ] Hacer merge y aprobar el despliegue en prod, sin correr el job
+
+Ajustes aprobados (28-oct-2026):
+- Antes de fijar el 1,0 se calculó el PSI de los orígenes históricos, sin entrenar.
+  - Varios orígenes normales lo pasaban, todos por `tendencia` después de un Hot Sale o diciembre. Por eso `tendencia` quedó solo como dato.
+- Se agregaron revisiones de lo que el PSI no ve:
+  - los nulos contra los 13 orígenes recientes;
+  - la cobertura de SKU con stock y de filas de venta;
+  - el corte del stock.
+- La cobertura se compara contra la semana más baja de las 4 anteriores y no contra su promedio, porque el promedio queda inflado después de cada Hot Sale.
+- Se agregó la cobertura del mes, contra las semanas que ya revisó la corrida anterior: SKU con stock y venta entre salidas de stock. Cubre el caso en que todo el mes llega roto.
+- Los umbrales y su calibración están en "Monitoreo y drift" de CLAUDE.md.
+
+Diseño:
+- **Dónde va en el job.** Dos tareas nuevas: ingest → features → `monitoreo_datos` → train → predict → export → `monitoreo_desempeno`.
+  - `monitoreo_datos` va antes de train, no solo antes de predict. Con datos rotos no se gastan los ~40 min de train ni se registra un champion entrenado con ellos.
+  - `monitoreo_desempeno` va al final. No depende de la corrida, y si falla, el pronóstico y `results.json` ya quedaron.
+  - La lógica va en `src/common/monitoreo.py`, en funciones puras de pandas, y cada tarea en su script: `src/monitoreo_datos.py` y `src/monitoreo_desempeno.py`.
+- **Drift de datos.**
+  - Variables principales, en una lista fija:
+    - historia: `rezago_1`, `media_4`, `media_13`, `media_52`, `tendencia` y `crecimiento_anual`;
+    - surtido: `estilos_color_con_venta_8` y `lanzamientos_8`;
+    - oferta: `stock_cierre` y `disponibilidad`.
+  - Sin calendario ni jerarquía. Las 13 semanas de un origen siempre tienen otro calendario que el historial completo, y la jerarquía no se mueve de una semana a otra.
+  - Se compara el origen (una fila por serie activa) contra la ventana de entrenamiento: una fila por serie × origen en las filas con que se entrena el champion (`backtest.entrenamiento`).
+  - El PSI usa 10 tramos en los deciles de la referencia y deja fuera los nulos. El entrenamiento tiene nulos por diseño: el stock antes de mayo de 2025 y `media_52` en 2024.
+  - Umbrales: menos de 0,25 es estable; de 0,25 a 1,0 es aviso, que queda en la tabla y en el log; 1,0 o más es extremo. `tendencia` queda solo como dato.
+  - **Nulos:** la parte de nulos del origen contra los últimos 13 orígenes. Da aviso si sube 10 puntos y es extremo si la variable llega 100 % nula y antes tenía datos.
+  - **Cobertura:** SKU con stock al cierre y filas de venta de la semana del origen, contra la más baja de las 4 semanas anteriores. Da aviso en 0,75 y es extremo en 0,6.
+  - **Cobertura del mes:** SKU con stock y venta entre salidas de stock de cada semana nueva, contra las 4 semanas que revisó la corrida anterior, con los mismos umbrales.
+  - **Corte del stock:** es extremo si el stock atrasa el origen una semana o más.
+  - Con un extremo, la tarea escribe la tabla y después falla, así que el job se detiene antes de train.
+  - Para seguir con un cambio extremo que se revisó y es legítimo, el job tiene el parámetro `aceptar_drift`, con la fecha del origen. Solo vale para ese origen y queda anotado en la tabla.
+    - Se pasa con `databricks bundle run -t <target> demanda_pipeline --params aceptar_drift=<fecha>` o desde "Run now with different parameters". El CD no lo usa.
+  - Tabla `monitoreo_datos`: una fila por corrida × revisión (`psi`, `nulos`, `cobertura` o `corte`), con el valor, la referencia, los umbrales, el nivel y si se aceptó.
+- **La semana duplicada en la ingesta.** `validation.py` revisa la venta completa, no por muestra, y se detiene si se repite una fecha + SKU, así que una semana cargada dos veces la para.
+  - No ve una semana con las unidades dobladas en las mismas filas. Ahí el PSI de `rezago_1` da de 0,7 a 1,0: aviso, y detención solo si llega a 1,0.
+- **Drift de desempeño.**
+  - Mide cada corrida de `predicciones` cuya ventana 3 ya cerró (origen + 13 semanas ≤ el último origen de features) y que todavía no esté en la tabla.
+  - Usa el mismo código del backtest: `metrics.a_ventanas` y `metrics.formato_estandar` sobre las filas semanales.
+  - El rango es el mínimo y el máximo por origen en los 8 orígenes del backtest donde se registró la versión que pronosticó.
+    - Sale del artefacto `predicciones_backtest.parquet` de ese run de MLflow, que se guardó al entrenar, así que quedó fijo antes de conocer la venta real.
+    - Sirve también para las corridas del 12-oct-2026 que se miden en enero.
+  - Alerta si el WAPE del mes 1, del mes 2 o el total queda arriba del máximo, o si el sesgo total queda fuera del rango, por arriba o por abajo. El MAPE va solo como referencia.
+  - Revisión manual si el origen y el anterior medido tienen alerta. Si un origen tiene varias corridas, cuenta la última, como en `results.json`.
+  - Ni la alerta ni la revisión detienen el job: quedan en la tabla y en el log.
+  - Mientras no cierre ninguna ventana, la tarea imprime el rango que se usará para cada corrida pendiente.
+  - Tabla `monitoreo_desempeno`: una fila por corrida medida, con las métricas del formato estándar y `wape_tipo_mes`, el rango de cada métrica de alerta, el run del backtest, las métricas fuera de rango y el estado. No guarda venta, pronóstico, MAE ni RMSE, que van en piezas.
+- **Solo agregar.** Las dos tablas tienen `delta.appendOnly` desde que se crean, como `predicciones`.
+- **Sin reentrenamiento por drift.** Cada corrida ya reentrena con todo lo conocido y aplica la regla del champion. Un drift extremo detiene el job, no reentrena.
+- **Log sin piezas.** Solo PSI, porcentajes, fechas y nombres de variables, también en el error que detiene el job. Una prueba lo verifica.
+- **No cambia** `results.json`, su esquema ni los workflows.
+- **Pruebas** (`tests/test_monitoreo.py`):
+  - PSI: 0 con distribuciones iguales, alto con un desplazamiento, y bien calculado con empates y nulos;
+  - niveles, detención y `aceptar_drift` solo para su origen;
+  - rango y alertas: el WAPE solo por arriba y el sesgo por los dos lados;
+  - revisión con 2 seguidas, ventanas cerradas y log sin piezas;
+  - cobertura del mes: un mes entero a medias que la cobertura de la semana no ve, la corrida anterior en la primera corrida (el último origen de `predicciones`) y la venta sin verificar cuando faltan salidas de stock;
+  - `tests/test_monitoreo_spark.py`: las salidas de stock en Spark dan igual que en pandas;
+  - `tests/test_bundle.py` con las 7 tareas.
+- **Demostración local** (`scripts/simular_monitoreo.py`, con `make simular-monitoreo`).
+  - Usa los 8 orígenes del backtest de dev y prod (29-dic-2025 a 13-jul-2026) como 8 corridas mensuales en vivo, con el algoritmo del champion actual (`lightgbm_tweedie_211`) entrenado hasta cada origen.
+  - El rango de cada uno sale del backtest que esa corrida habría hecho: 8 orígenes que terminan 13 semanas antes. Son 15 orígenes más, del 17-mar-2025 al 13-abr-2026: 23 entrenamientos, unos 40 min.
+  - Usa el mismo código que el job sobre `data/`, y arma features con las funciones de `src/features.py` en Spark local.
+  - Por origen muestra el PSI máximo y su variable, WAPE M1, M2 y total, sesgo, rango y estado, y la correlación de Spearman entre el drift y el error.
+  - Con 8 puntos solo se notaría una relación fuerte. Como complemento, la misma correlación en los 23 orígenes, cuyas ventanas se traslapan.
+  - Revisa que las 10 variables estén entre las de más importancia del champion.
+  - No escribe en Databricks ni en git: el resultado va a esta sección, en porcentajes.
+- **Prueba en dev.** Solo las dos tareas nuevas (`databricks bundle run -t dev demanda_pipeline --only monitoreo_datos,monitoreo_desempeno`), unos minutos de cuota en vez de los ~45 del job completo.
+  - `monitoreo_desempeno` no tendrá ventanas cerradas hasta enero, pero calcula e imprime el rango de las corridas abiertas. Así prueba desde ya la lectura del artefacto de MLflow.
+- **Limitaciones conocidas.**
+  - Con 8 orígenes, aunque el modelo siga igual de bueno, un origen nuevo queda arriba del peor de los 8 con probabilidad 1 en 9 en cada métrica. Por eso una alerta sola es aviso, y la revisión pide dos seguidas.
+  - Los 8 orígenes del rango nunca caen en la misma temporada que el pronóstico en vivo. El del 12-oct-2026, con Buen Fin y diciembre, se compara con orígenes de diciembre a julio.
+  - **El rango de enero es poco exigente.** Sus 8 orígenes incluyen la alerta del 20-abr-2026 y la revisión manual del 18-may-2026, así que va de 30,2 % a 45,4 % en WAPE total y de −18,0 % a +33,1 % en sesgo.
+    - Se deja así porque se fijó antes de ver la venta real.
+  - La cobertura de la semana compara contra las 4 semanas anteriores, que con el refresco mensual también son nuevas. Un mes entero roto lo ve la cobertura del mes, que compara contra las semanas que ya revisó la corrida anterior.
+  - La cobertura del mes está calibrada con corridas cada 4, 5 o 13 semanas. Después de un hueco más largo, el bloque nuevo cruza más temporada y puede dar avisos falsos.
+  - Con el stock atrasado, `aceptar_drift` solo repite el pronóstico desde el mismo origen. Ver el pendiente del modo sin stock.
+
+Resultado (28-oct-2026):
+- **Calibración** (`make calibrar-drift`, 137 orígenes semanales de mar-2024 a oct-2026, sin entrenar).
+  - Con `tendencia` informativa, 28 orígenes darían aviso de PSI y 3 de cobertura. Solo se detendría el del 24-feb-2025, por el inicio del stock.
+  - Ningún aviso ni detención por nulos. El detalle está en CLAUDE.md.
+- **Demostración** (`make simular-monitoreo`): los 8 orígenes del backtest de dev y prod como corridas mensuales en vivo, con `lightgbm_tweedie_211` entrenado hasta cada uno. Cada uno se compara con el rango del backtest que esa corrida habría hecho.
+  - **Reproduce dev.** Los 8 juntos dan WAPE M1 35,1 %, M2 44,9 %, total 36,5 %, sesgo +2,4 % y WAPE tipo × mes 43,6 %. En dev fueron 35,5 %, 45,0 %, 36,4 %, +2,7 % y 43,8 %: la misma diferencia entre máquinas de la fase 8.
+
+  | Origen | PSI máx. (sin `tendencia`) | PSI `tendencia` | WAPE M1 | WAPE M2 | WAPE total | Sesgo total | Fuera del rango | Estado |
+  |---|---|---|---|---|---|---|---|---|
+  | 29-dic-2025 | 0,11 (`media_4`) | 0,49 | 35,0 % | 38,9 % | 36,2 % | +0,6 % | - | en rango |
+  | 26-ene-2026 | 0,26 (`lanzamientos_8`), aviso | 0,26 | 31,9 % | 50,7 % | 41,2 % | −15,0 % | - | en rango |
+  | 23-feb-2026 | 0,15 (`crecimiento_anual`) | 0,07 | 39,0 % | 47,0 % | 38,9 % | −11,6 % | - | en rango |
+  | 23-mar-2026 | 0,11 (`media_13`) | 0,11 | 27,9 % | 30,1 % | 30,1 % | +9,3 % | - | en rango |
+  | 20-abr-2026 | 0,10 (`crecimiento_anual`) | 0,22 | 23,5 % | 58,1 % | 35,1 % | +22,1 % | WAPE M2 (máx. 52,0 %), sesgo (máx. +13,7 %) | alerta |
+  | 18-may-2026 | 0,11 (`media_13`) | 0,13 | 49,1 % | 58,9 % | 45,4 % | +32,5 % | las cuatro | revisión manual |
+  | 15-jun-2026 | 0,20 (`rezago_1`) | 0,70 | 39,9 % | 43,0 % | 33,3 % | −3,8 % | WAPE M1 (máx. 39,2 %) | revisión manual |
+  | 13-jul-2026 | 0,11 (`crecimiento_anual`) | 0,22 | 32,5 % | 40,3 % | 32,2 % | −18,4 % | - | en rango |
+
+  - **Drift de datos bajo en las 8.** El PSI más alto fue 0,26 y dio un solo aviso, por `lanzamientos_8` en ene-2026. Nada se habría detenido.
+  - **Drift de desempeño en abril y mayo de 2026.** Los orígenes del 20-abr y el 18-may sobrepronosticaron +22 % y +33 %, con ventanas que cubren el Hot Sale 2026 y el inicio del verano.
+    - La alerta del 20-abr pasó a revisión manual el 18-may, y siguió el 15-jun por poco (WAPE M1 de 39,9 % contra un máximo de 39,2 %). Volvió al rango el 13-jul.
+  - **¿Más drift, más error? No en este periodo.**
+    - En las 8, Spearman entre el PSI máximo y el WAPE tipo × mes da +0,14 (p = 0,75, permutaciones exactas). La relación más alta es +0,62 (p = 0,11), entre el PSI medio y el WAPE relativo a la mediana de su backtest.
+    - En los 23 orígenes da +0,41 (PSI medio contra WAPE tipo × mes, p = 0,06). Como las ventanas se traslapan, ese p es optimista. La relación la arrastran mar–abr 2025, con el stock recién iniciado: tuvieron el PSI más alto y errores entre los 4 más altos.
+    - El segundo origen con más error de los 23 (18-may-2026, 51,8 %) tuvo uno de los PSI más bajos (0,11). Las variables de entrada se veían normales; lo que cambió fue la respuesta de la venta.
+    - Por eso hacen falta los dos monitoreos: el de datos detecta datos rotos y el de desempeño, un modelo que dejó de acertar.
+  - **Importancia.** De las 10 variables monitoreadas, 5 están entre las 10 de más ganancia del champion: `estilos_color_con_venta_8` (1.ª), `rezago_1` (2.ª), `media_4` (3.ª), `media_13` (6.ª) y `stock_cierre` (9.ª).
+    - `disponibilidad` (27.ª) y `lanzamientos_8` (30.ª) pesan poco en el modelo, pero sirven para detectar roturas del stock y del surtido.
+    - Entre las 10 primeras sin monitorear están `media_8`, `rezago_2` y `media_26`, que se mueven con las monitoreadas, y `tipo_producto` y `semana_iso`, que quedan fuera por diseño.
+- **Para la medición de enero.** El rango del pronóstico del 12-oct-2026 sale de estos mismos 8 orígenes, así que es amplio porque incluye abril y mayo.
+  - Con los números locales: WAPE M1 de 23,5 % a 49,1 %, M2 de 30,1 % a 58,9 %, total de 30,1 % a 45,4 % y sesgo de −18,4 % a +32,5 %.
+  - El exacto lo calcula la tarea con el artefacto de MLflow de la versión que pronosticó.
+- **Dev** (`bundle validate` y `deploy -t dev`, y `bundle run --only monitoreo_datos,monitoreo_desempeno`). Las dos tareas terminaron en verde en 2,5 minutos.
+  - `monitoreo_datos` creó `workspace.tesis_dev.monitoreo_datos` con `appendOnly` y escribió 23 revisiones del origen 12-oct-2026.
+    - Todas quedaron estables: el PSI más alto fue 0,09, la cobertura de SKU con stock 1,14 y la de filas de venta 1,18, y el stock no atrasa el origen.
+  - `monitoreo_desempeno` no encontró ventanas cerradas, así que no creó su tabla.
+    - Leyó desde MLflow el rango de las corridas de las versiones 2 y 3: WAPE M1 de 23,8 % a 50,0 %, M2 de 30,2 % a 58,8 %, total de 30,2 % a 45,4 % y sesgo de −18,0 % a +33,1 %. Coincide con la simulación local.
+  - `predicciones` sigue intacta. La corrida solo ejecutó las dos tareas nuevas, que solo la leen, y la consulta de solo lectura de su historial lo confirma:
+    - sigue en la versión 2, con el último cambio a las 17:47:16 UTC (un `WRITE` en modo `Append`);
+    - `delta.appendOnly = true`;
+    - la corrida del 2026-10-28 16:28:09 tiene 7.424 filas, igual que la de las 17:47:13.
+- **Cobertura del mes** (aprobada el 28-oct-2026 e implementada en el mismo PR).
+  - **Problema.** Con el refresco mensual llegan 4 o 5 semanas nuevas a la vez. Si todas llegan rotas, la cobertura de la semana las compara entre sí y queda en 1.
+    - Simulado en 18 orígenes con la venta de todas las series × 0,5 en las últimas 4 o 5 semanas: el PSI más alto (`media_4` o `rezago_1`) tiene una mediana de 0,27. Da aviso en 9 de 18 y nunca llega a 1,0.
+  - **Solución.** Cada semana nueva se compara contra las 4 semanas que ya revisó la corrida anterior, hasta su origen, con los mismos umbrales: aviso en 0,75 y detención en 0,6.
+    - **SKU con stock del mes.**
+    - **Venta entre salidas de stock del mes.** El conteo de filas de venta no sirve para el mes:
+      - contra las semanas revisadas, la semana antes del Hot Sale cae sola a 0,50;
+      - contra el año anterior, a 0,16, porque el Hot Sale cambia de fecha.
+  - **Corrida anterior.** El último origen de `monitoreo_datos` cuya corrida no tuvo extremos o los aceptó, o el último de `predicciones`.
+    - La primera corrida con monitoreo, como la de enero en prod, usa las 4 semanas hasta el origen de la última corrida en `predicciones`, el 12-oct-2026.
+    - Si tampoco hay, las 4 semanas hasta el origen − 4 semanas.
+  - **En Spark.** `monitoreo_datos` calcula las salidas de stock de `stock_bronze`. Una prueba con Spark local verifica que dan igual que la función de pandas con la que se calibró.
+  - **Calibración** (`make calibrar-drift`): ninguna detención en la historia.
+
+    | Revisión | Corrida anterior | Mínimo normal | Avisos | Mes entero a la mitad | Una semana a la mitad |
+    |---|---|---|---|---|---|
+    | SKU con stock | 4 / 5 / 13 semanas antes | 0,81 / 0,81 / 0,76 | 0 | se detiene en 64 de 69 | 62 de 69 |
+    | Venta entre salidas | 4 / 5 / 13 semanas antes | 0,70 / 0,70 / 0,70 | 1 / 2 / 6 | se detiene en 60 de 69 | 41 de 69 |
+
+    - Con 13 semanas, como la corrida de enero en prod, el bloque nuevo cruza Buen Fin y diciembre, y aun así ningún origen normal se detiene.
+  - **Solo vale porque el stock viene de los movimientos del almacén, independiente de la venta.** Está documentado en CLAUDE.md.
+  - Sin salidas de stock en una semana nueva, venta entre salidas queda `sin datos`. El log dice que la venta del mes no se verificó, no se detiene el job y `aceptar_drift` no la vuelve estable.
+
+Pendiente (propuesto, sin implementar): **modo sin stock reciente.**
+- **Problema.** `features.py` corta en la fecha más temprana entre la venta y el stock. Si la venta llega a enero y el stock a octubre, el origen se queda en octubre: liberar el freno no produce un pronóstico nuevo.
+- **Propuesta.** Un parámetro del job `exigir_stock`, `true` por defecto, que llega a `features.py`, como `exigir_stock=False` en la experimentación.
+  - Con `false`, features corta por la fecha de la venta. En las semanas posteriores al último día de stock, `stock_cierre`, `skus_con_stock`, `estilos_color_con_stock` y `disponibilidad` quedan nulos, no en 0, igual que antes de mayo de 2025.
+  - El modelo ya conoce el stock nulo: lo tuvo en todo 2024 y hasta abril de 2025 al entrenar. Con stock nulo se apoya en la historia de la venta.
+- **Cómo se usa.** El job se detiene por el corte del stock y se corre con `exigir_stock=false` y `aceptar_drift=<origen de la venta>`.
+  - En esa corrida, `monitoreo_datos` marca extremos que el mismo `aceptar_drift` libera:
+    - el corte del stock;
+    - los nulos de `stock_cierre` y `disponibilidad` (100 % contra 0 %);
+    - la cobertura de SKU con stock, de la semana y del mes (0).
+  - Así, liberar el freno sí da un pronóstico nuevo desde el origen de la venta.
+  - **Venta entre salidas de stock** no se puede calcular en las semanas nuevas, porque no tienen stock.
+    - Queda `sin datos`, y el log dice que la venta del mes no se verificó.
+    - `aceptar_drift` no la marca como estable: el rastro dice que esa venta se usó sin revisar.
+    - Ya funciona así desde esta fase. Una prueba lo cubre.
+- **Rastro.**
+  - `exigir_stock` queda como parámetro del run de MLflow y como columna nueva de `predicciones`. Agregar una columna está permitido con `appendOnly`.
+  - `monitoreo_desempeno` mide esas corridas como cualquier otra.
+- **Pruebas.**
+  - Con el stock cortado antes que la venta, las variables de stock quedan nulas después del corte y no en 0.
+  - El corte sale de la venta, y la prueba de "sin fuga de información" sigue pasando.
+  - Con `exigir_stock=true` todo queda igual que hoy.
+
+---
+
 ## Fase 9. Front en GitHub Pages
 
 Manual:

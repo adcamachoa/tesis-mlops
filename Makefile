@@ -9,8 +9,10 @@ SECRETO_CA := $(if $(wildcard .certs/ca_bundle.pem),--secret id=ca$(comma)src=.c
 export MSYS_NO_PATHCONV := 1
 
 EJECUTAR := docker run --rm -v "$(CURDIR):/app" $(IMAGEN)
+# los scripts de scripts/ importan de src/, como los del job en Databricks
+EJECUTAR_SCRIPT := docker run --rm -e PYTHONPATH=src -v "$(CURDIR):/app" $(IMAGEN)
 
-.PHONY: build lint test
+.PHONY: build lint test calibrar-drift simular-monitoreo
 
 build:
 	docker build $(SECRETO_CA) -t $(IMAGEN) .
@@ -20,3 +22,10 @@ lint: build
 
 test: build
 	$(EJECUTAR) pytest
+
+# monitoreo con los parquet de data/, sin Databricks (ver scripts/simular_monitoreo.py)
+calibrar-drift: build
+	$(EJECUTAR_SCRIPT) python scripts/simular_monitoreo.py calibrar
+
+simular-monitoreo: build
+	$(EJECUTAR_SCRIPT) python scripts/simular_monitoreo.py demo
