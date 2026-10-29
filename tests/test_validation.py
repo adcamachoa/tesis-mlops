@@ -4,7 +4,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from common.validation import ErrorValidacion, validar
+from common.validation import (
+    ErrorValidacion,
+    SinSemanaNueva,
+    comparar_productos,
+    describir_productos,
+    revisar_llave,
+    revisar_semana_nueva,
+    validar,
+)
 
 MUESTRA = Path(__file__).parent / "data" / "muestra.parquet"
 HOY = pd.Timestamp("2026-10-28")
@@ -211,3 +219,47 @@ def test_acepta_los_tipos_que_entrega_spark(tablas):
     productos.loc[0, "es_basico"] = None
     productos.loc[0, "talla"] = None
     validar(tablas, hoy=HOY)
+
+
+def test_el_freno_se_detiene_sin_un_domingo_nuevo():
+    publicado = pd.Timestamp("2026-11-01")  # el domingo que llegó a la página la semana pasada
+    # la exportación del lunes trae la semana siguiente completa
+    assert "semana nueva" in revisar_semana_nueva(pd.Timestamp("2026-11-08"), pd.Timestamp("2026-11-08"), publicado)
+    # la misma exportación otra vez, o una que no llega al domingo
+    for venta in (pd.Timestamp("2026-11-01"), pd.Timestamp("2026-11-07")):
+        with pytest.raises(SinSemanaNueva, match="no traen un domingo nuevo"):
+            revisar_semana_nueva(venta, venta, publicado)
+    # la venta es nueva pero el stock se quedó atrás: cuenta la que menos llega, como en features
+    with pytest.raises(SinSemanaNueva, match="el stock al 2026-11-01"):
+        revisar_semana_nueva(pd.Timestamp("2026-11-08"), pd.Timestamp("2026-11-01"), publicado)
+
+
+def test_sin_nada_publicado_no_hay_freno():
+    assert "sin una corrida publicada" in revisar_semana_nueva(pd.Timestamp("2026-10-18"), pd.Timestamp("2026-10-18"),
+                                                               None)
+
+
+def test_la_llave_tolera_ediciones_del_catalogo_y_skus_nuevos():
+    anteriores = _productos([f"SKU-{i:06d}" for i in range(200)])
+    nuevos = pd.concat([anteriores, _productos(["SKU-999998", "SKU-999999"]).assign(estilo="EST-NUEVO")],
+                       ignore_index=True)
+    nuevos.loc[0, "estilo_color"] = "EC-EDITADO"  # 1 de 200: 0,5 %
+    nuevos.loc[1:4, "categoria"] = "Otra categoría"
+    conteo = comparar_productos(anteriores, nuevos)
+    assert conteo == {"existentes": 200, "faltantes": 0, "cambio_llave": 1, "cambio_jerarquia": 4, "nuevos": 2}
+    assert revisar_llave(conteo) == []
+    assert describir_productos(conteo).startswith("productos: 200 SKU cargados, 2 nuevos, 0 faltantes, 1 con otro")
+
+
+def test_la_llave_se_detiene_si_falta_un_sku_o_parece_regenerada():
+    anteriores = _productos([f"SKU-{i:06d}" for i in range(200)])
+    sin_uno = anteriores.iloc[1:]
+    assert revisar_llave(comparar_productos(anteriores, sin_uno)) == ["productos: faltan 1 SKU que ya estaban cargados"]
+    regenerada = anteriores.copy()
+    regenerada.loc[:2, "estilo"] = "EST-OTRO"  # 3 de 200: 1,5 %, más del 1 %
+    (problema,) = revisar_llave(comparar_productos(anteriores, regenerada))
+    assert "3 de 200 SKU cambiaron de estilo o estilo_color (1.5%)" in problema and "regenerada" in problema
+    # justo el 1 % todavía son ediciones
+    dos = anteriores.copy()
+    dos.loc[:1, "estilo"] = "EST-OTRO"
+    assert revisar_llave(comparar_productos(anteriores, dos)) == []

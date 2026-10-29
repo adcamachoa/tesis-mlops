@@ -1,8 +1,13 @@
-# Asset Bundle del pipeline de demanda: el job demanda_pipeline con sus siete tareas encadenadas.
+# Asset Bundle del pipeline de demanda: el job semanal demanda_pipeline, que reentrena solo cuando toca.
 #   databricks bundle validate -t dev
 #   databricks bundle deploy -t dev
 #   databricks bundle run -t dev demanda_pipeline
 #   databricks bundle run -t dev demanda_pipeline --params aceptar_drift=2027-01-11   # sigue con un drift ya revisado
+#   databricks bundle run -t dev demanda_pipeline --params reentrenar=si              # entrena aunque no toque
+#
+# Cada semana: ingest → features → monitoreo_datos → monitoreo_desempeno → toca_reentrenar. Si toca reentrenar (cada 4
+# semanas desde el último origen pronosticado, o antes con una alerta de desempeño nueva), sigue train → predict; si no,
+# el pronóstico publicado no cambia. export corre en las dos ramas y publica la venta real de las semanas nuevas.
 #
 # Sin host ni token: salen del perfil de `databricks configure` en local y de los secrets en CI.
 # El bundle solo declara el job. Los schemas, volúmenes, tablas y el modelo de Unity Catalog no son recursos del
@@ -13,6 +18,9 @@ bundle:
 variables:
   schema:
     description: Schema con el Volume raw y las tablas. No tiene valor por defecto, así que cada target fija el suyo.
+  programacion:
+    description: PAUSED o UNPAUSED. Solo prod corre cada lunes; en dev, el modo development la pausa de todos modos.
+    default: PAUSED
 
 # data/, .certs/ y .claude/ no se suben porque están en .gitignore; tests/ y scripts/ solo corren en local
 sync:
@@ -26,30 +34,38 @@ resources:
       name: demanda_pipeline
       # una corrida a la vez: dos juntas se pisarían las tablas bronze y features
       max_concurrent_runs: 1
-      # train tardó hasta 35 min en la fase 4; si algo se cuelga, se corta antes de gastar la cuota
+      # train tardó hasta 38 min; si algo se cuelga, se corta antes de gastar la cuota
       timeout_seconds: 7200
-      # semanal y en pausa para no consumir cuota; en dev, el modo development la pausa de todos modos
+      # los lunes a las 9:00, con los parquet que se suben al Volume con corte al domingo; si no traen un domingo nuevo,
+      # ingest detiene la corrida
       schedule:
-        quartz_cron_expression: "0 0 7 ? * MON"
-        timezone_id: America/Mexico_City
-        pause_status: PAUSED
+        quartz_cron_expression: "0 0 9 ? * MON"
+        timezone_id: America/Bogota
+        pause_status: ${var.programacion}
       environments:
         - environment_key: default
           spec:
             environment_version: "2"  # Python 3.11, como la imagen de Docker
             dependencies:
               - "-r ${workspace.file_path}/requirements.txt"
-      # la fecha del origen cuyo cambio extremo en los datos ya se revisó y es legítimo; vacío en cada corrida normal
+      # los dos van vacíos en cada corrida normal:
+      # - aceptar_drift: la fecha del origen cuyo cambio extremo en los datos ya se revisó y es legítimo;
+      # - reentrenar: "si" entrena y pronostica aunque no toque, y repite la semana aunque no haya un domingo nuevo
       parameters:
         - name: aceptar_drift
           default: ""
+        - name: reentrenar
+          default: ""
       tasks:
-        # ingest publica bronze_version como task value y train la lee con este task_key
+        # se detiene sin gastar la corrida si los datos no traen un domingo nuevo; publica bronze_version como task
+        # value, y train la lee con este task_key. Sin el reintento automático de serverless: una detención a
+        # propósito no se arregla repitiéndola
         - task_key: ingest
+          disable_auto_optimization: true
           environment_key: default
           spark_python_task:
             python_file: src/ingest.py
-            parameters: ["--schema", "${var.schema}"]
+            parameters: ["--schema", "${var.schema}", "--reentrenar", "{{job.parameters.reentrenar}}"]
         - task_key: features
           depends_on:
             - task_key: ingest
@@ -58,17 +74,36 @@ resources:
             python_file: src/features.py
             parameters: ["--schema", "${var.schema}"]
         # con un cambio extremo en los datos falla antes de train: no se gasta el entrenamiento ni se registra un
-        # champion entrenado con datos rotos, salvo que aceptar_drift traiga la fecha de este origen
+        # champion entrenado con datos rotos, salvo que aceptar_drift traiga la fecha de este origen. Sin reintento
+        # automático: repetirla escribiría sus revisiones dos veces
         - task_key: monitoreo_datos
           depends_on:
             - task_key: features
+          disable_auto_optimization: true
           environment_key: default
           spark_python_task:
             python_file: src/monitoreo_datos.py
             parameters: ["--schema", "${var.schema}", "--aceptar-drift", "{{job.parameters.aceptar_drift}}"]
-        - task_key: train
+        # antes de la condición: una ventana que cierra esta semana con alerta puede adelantar el reentrenamiento.
+        # Publica la decisión como task value reentrenar
+        - task_key: monitoreo_desempeno
           depends_on:
             - task_key: monitoreo_datos
+          environment_key: default
+          spark_python_task:
+            python_file: src/monitoreo_desempeno.py
+            parameters: ["--schema", "${var.schema}", "--reentrenar", "{{job.parameters.reentrenar}}"]
+        - task_key: toca_reentrenar
+          depends_on:
+            - task_key: monitoreo_desempeno
+          condition_task:
+            op: EQUAL_TO
+            left: "{{tasks.monitoreo_desempeno.values.reentrenar}}"
+            right: "true"
+        - task_key: train
+          depends_on:
+            - task_key: toca_reentrenar
+              outcome: "true"
           environment_key: default
           spark_python_task:
             python_file: src/train.py
@@ -81,20 +116,18 @@ resources:
           spark_python_task:
             python_file: src/predict.py
             parameters: ["--schema", "${var.schema}"]
+        # junta las dos ramas: corre si ninguna dependencia falló y al menos una corrió. Si no toca reentrenar, train y
+        # predict quedan excluidos (cuenta como éxito) y corrió la rama false; si toca y predict falla, no exporta. Con
+        # AT_LEAST_ONE_SUCCESS sí exportaría, porque la rama false excluida también cuenta como éxito
         - task_key: export
           depends_on:
             - task_key: predict
+            - task_key: toca_reentrenar
+              outcome: "false"
+          run_if: NONE_FAILED
           environment_key: default
           spark_python_task:
             python_file: src/export_results.py
-            parameters: ["--schema", "${var.schema}"]
-        # al final: no depende de esta corrida, nunca detiene el job y, si falla, results.json ya quedó
-        - task_key: monitoreo_desempeno
-          depends_on:
-            - task_key: export
-          environment_key: default
-          spark_python_task:
-            python_file: src/monitoreo_desempeno.py
             parameters: ["--schema", "${var.schema}"]
 
 targets:
@@ -110,3 +143,4 @@ targets:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     variables:
       schema: tesis
+      programacion: UNPAUSED

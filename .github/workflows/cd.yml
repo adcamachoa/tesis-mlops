@@ -2,10 +2,11 @@
 #
 # - Corre en push a main, solo si cambia algo que va al job, y con workflow_dispatch. Nunca en un pull request.
 # - El job usa el environment prod: GitHub pide aprobación antes de empezar y solo acepta la rama main.
-# - Desplegar no gasta cómputo: sube el código y la definición del job, no corre nada ni toca tablas. Con
-#   workflow_dispatch, la acción elige qué más hace:
+# - Desplegar no gasta cómputo: sube el código y la definición del job, no corre nada ni toca tablas. La programación
+#   semanal de prod (los lunes) queda activa con el despliegue. Con workflow_dispatch, la acción elige qué más hace:
 #   - desplegar (por defecto): nada más;
-#   - correr: el job completo, unos 45 min de cuota;
+#   - correr: el job como cada lunes, que reentrena solo si toca (unos 5 min, o 41 si reentrena);
+#   - reentrenar: el job entrenando y pronosticando aunque no toque, y aunque no haya un domingo nuevo (unos 41 min);
 #   - solo_export: solo la tarea export, unos 3 min, que vuelve a generar los datos de la página desde las tablas.
 #   Al terminar bien un CD lanzado a mano, pages.yml publica los datos.
 # - Todo va con -t prod, el target del schema tesis: el CD nunca toca el schema de dev.
@@ -28,11 +29,12 @@ on:
   workflow_dispatch:
     inputs:
       accion:
-        description: "Qué hacer en prod después de desplegar: nada, correr el job (unos 45 min de cuota) o solo el export (unos 3 min)"
+        description: "Qué hacer en prod después de desplegar: nada, correr el job como cada lunes, reentrenar aunque no toque (unos 41 min de cuota) o solo el export (unos 3 min)"
         type: choice
         options:
           - desplegar
           - correr
+          - reentrenar
           - solo_export
         default: desplegar
 
@@ -100,6 +102,14 @@ jobs:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: databricks bundle run -t prod demanda_pipeline > /dev/null
+
+      # El mismo job, entrenando y pronosticando aunque no toque. Descarta stdout igual que la corrida normal.
+      - name: Reentrenar en prod
+        if: inputs.accion == 'reentrenar'
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle run -t prod demanda_pipeline --params reentrenar=si > /dev/null
 
       # Solo la tarea export: vuelve a generar los datos de la página desde las tablas, sin entrenar ni pronosticar.
       # Descarta stdout igual que la corrida completa.

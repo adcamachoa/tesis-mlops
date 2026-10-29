@@ -621,12 +621,12 @@ Pendiente (propuesto, sin implementar): **modo sin stock reciente.**
 Redefinida el 28-oct-2026. La página ya existe en el repo `tesis-mlops-web`: lee un `manifest.json` y un `results.json` por pronóstico desde una URL pública, con el contrato de su README. Esta fase ya no construye el front aquí. Genera esos archivos y los publica en el GitHub Pages de este repo, en `adcamachoa.github.io/tesis-mlops/datos/`.
 
 Manual:
-- [ ] En GitHub: Settings → Pages → Source: GitHub Actions
-- [ ] En Settings → Environments, revisar que `github-pages` solo acepte `main`
-- [ ] Revisar la prueba en dev antes del merge
-- [ ] Hacer merge del PR y aprobar el despliegue en prod. El merge solo despliega: `pages.yml` no publica.
-- [ ] Exportar en prod: `gh workflow run cd.yml --ref main -f accion=solo_export`, y aprobarlo. Al terminar en verde, `pages.yml` publica solo.
-- [ ] Comprobar que `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real y que pasa la validación
+- [x] En GitHub: Settings → Pages → Source: GitHub Actions
+- [x] En Settings → Environments, revisar que `github-pages` solo acepte `main`
+- [x] Revisar la prueba en dev antes del merge
+- [x] Hacer merge del PR y aprobar el despliegue en prod. El merge solo despliega: `pages.yml` no publica.
+- [x] Exportar en prod: `gh workflow run cd.yml --ref main -f accion=solo_export`, y aprobarlo. Al terminar en verde, `pages.yml` publica solo.
+- [x] Comprobar que `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real y que pasa la validación
 
 Prompt para Claude Code:
 
@@ -656,8 +656,8 @@ Rama fase-9-publicacion y PR. Propón el plan primero.
 Terminado cuando:
 - [x] `make lint` y `make test` pasan, con las pruebas nuevas
 - [x] En dev, el export deja `output/datos/` con el manifest y un `results.json` por origen, y pasa la validación
-- [ ] El CD con `accion=solo_export` termina en verde en prod y `pages.yml` publica
-- [ ] `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real
+- [x] El CD con `accion=solo_export` termina en verde en prod y `pages.yml` publica
+- [x] `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real: el origen 12-oct-2026, con la corrida de prod de las 23:22:23 (revisado el 29-oct-2026)
 - [x] Commit `fase 9: datos públicos para la página`, por PR
 
 Ajustes aprobados (28-oct-2026):
@@ -745,6 +745,121 @@ Fuera de esta fase:
   - **Va solo cuando el manifest real ya responde en la URL.** Antes, la página apuntaría a una carpeta vacía y mostraría un error en vez del ejemplo.
 - El semáforo del monitoreo en la página.
 - Las propuestas de la versión 2 de `results.json` del README de la web.
+
+---
+
+## Fase 9b. Cadencia semanal y monitoreo por ventana
+
+La tesis decía "un pronóstico cada 4 semanas". Desde esta fase, además:
+- la venta real publicada se actualiza cada semana;
+- cada ventana del pronóstico se mide apenas cierra;
+- una alerta de desempeño adelanta el reentrenamiento.
+
+Se numera 9b para no cambiar las referencias a la fase 10.
+
+Prompt para Claude Code (resumido):
+
+```
+La cadencia de corridas y el monitoreo de desempeño. Propón el plan antes de
+editar y no corras nada en prod.
+1. Cada lunes se suben al Volume de prod los 5 parquet con corte al domingo, de
+   una exportación nueva que reutiliza la llave.
+2. Un solo job semanal, los lunes a las 9:00 (America/Bogota): siempre ingest →
+   features → monitoreo_datos → monitoreo_desempeno → export, y una condition_task
+   "¿toca reentrenar?" que agrega train → predict cada 4 semanas desde el último
+   origen entrenado, o antes si la ventana medida más reciente dio alerta. Un
+   drift extremo de datos sigue deteniendo el job.
+3. Las semanas sin reentrenamiento solo se actualiza la venta real.
+4. Calendario esperado: orígenes 9-nov, 7-dic y 4-ene.
+5. En la página, las semanas pasadas conservan el pronóstico del origen anterior.
+6. results.json necesita la venta real de las semanas ya pronosticadas.
+7. Freno: sin un domingo nuevo, el job se detiene sin gastar cuota.
+8. Medir cada ventana apenas cierre, contra el rango de esa ventana en el
+   backtest, y revisar la regla de revisión manual por ventana.
+9. Revisar la cuota de Free Edition.
+10. Actualizar PLAN.md y CLAUDE.md.
+```
+
+Decisiones (29-oct-2026):
+- El merge activa la programación en prod. Se apunta a hacerlo antes del lunes 2-nov; si no alcanza, la primera corrida se lanza a mano.
+- **Campos nuevos en `results.json`,** en la versión 1: `real_hasta`, `real_horizonte`, `pronostico_anterior` y `ventanas_real`.
+- **El sesgo de cada mes** va como dato, sin alerta.
+- **La llave.** `ingest` solo se detiene si falta un SKU que ya estaba, o si cambia el estilo o `estilo_color` de más del 1 % de los existentes. Los casos sueltos van al log.
+- **Antes del merge:** la calibración de 1 semana de `monitoreo_datos` y la prueba en dev, nunca un lunes.
+- **Después del merge:** extender la demostración de la 8b a la medición por ventana, sin atrasar el merge.
+
+Manual:
+- [ ] Revisar la prueba en dev antes del merge
+- [ ] Hacer merge del PR y aprobar el despliegue en prod, idealmente antes del lunes 2-nov. Desde ahí, el job corre cada lunes a las 9:00 de Bogotá.
+- [ ] Cada lunes, antes de las 9:00 (Bogotá), subir al Volume de prod (`/Volumes/workspace/tesis/raw/`) los 5 parquet con corte al domingo. Si llegan después, lanzar la corrida a mano: `gh workflow run cd.yml --ref main -f accion=correr`.
+- [ ] **Hacia el 15-dic-2026, hacer un commit al repo**, por ejemplo con el resultado de la medición del 21-dic. En un repo público, GitHub desactiva el schedule de `pages.yml` después de 60 días sin actividad, y tiene que seguir activo hasta el 18-ene-2027.
+- [ ] PR en `tesis-mlops-web` para usar los campos nuevos: `generar_ejemplo.py` tiene que generarlos (la validación de aquí los exige), y la página puede dibujarlos.
+
+Terminado cuando:
+- [x] `make lint` y `make test` pasan, con las pruebas nuevas
+- [x] La calibración con la corrida anterior 1 semana antes no detiene ningún origen normal
+- [x] En dev, la corrida normal va por la rama sin reentrenar y exporta, la repetida se detiene en el freno y la de `reentrenar=si` va por la rama que entrena
+- [ ] Commit `fase 9b: cadencia semanal y monitoreo por ventana`, por PR
+
+Diseño:
+- **El job** (`databricks.yml`): ingest → features → `monitoreo_datos` → `monitoreo_desempeno` → `toca_reentrenar` → (sí) train → predict → export; (no) export.
+  - **La condición.** `toca_reentrenar` es un `condition_task` que compara el task value `reentrenar` que publica `monitoreo_desempeno`, como booleano.
+  - **La unión de las dos ramas.** `export` depende de `predict` y de la rama `false` de la condición, con `run_if: NONE_FAILED`.
+    - Databricks exige que toda dependencia de un `condition_task` diga su rama; el primer despliegue lo rechazó sin ella.
+    - Las tareas excluidas cuentan como éxito, así que `export` corre en las dos ramas, y no corre si `train` o `predict` fallan.
+    - `AT_LEAST_ONE_SUCCESS` exportaría aunque `predict` falle.
+  - **Programación:** lunes a las 9:00, `America/Bogota`. La variable `programacion` vale `PAUSED` por defecto y `UNPAUSED` en prod.
+  - **Sin reintento automático** (`disable_auto_optimization: true`) en `ingest` y `monitoreo_datos`, cuyas fallas son detenciones a propósito.
+  - **Parámetros:** `aceptar_drift`, como antes, y `reentrenar` (vacío o `si`).
+- **Cuándo toca reentrenar** (`monitoreo.decidir_reentrenamiento`):
+  - cuando el origen queda 4 semanas o más después del último origen de `predicciones`;
+  - o antes, si alguna medición con alerta cerró después del `datos_hasta` del último pronóstico.
+  - No se usa "la ventana medida más reciente": el 18-ene cierran 3 ventanas el mismo día, y una alerta vieja reentrenaría cada lunes hasta que cerrara otra.
+- **Freno** (`validation.revisar_semana_nueva`, en `ingest`): el último domingo completo de venta y stock contra el `real_hasta` del último `results.json`.
+  - Si `results.json` no trae `real_hasta`, como en la primera corrida, no hay freno.
+  - `reentrenar=si` se lo salta.
+- **Llave** (`validation.comparar_productos` y `revisar_llave`, en `ingest`): se detiene si faltan SKU o si más del 1 % cambia de `estilo` o `estilo_color`.
+- **Medición por ventana** (`monitoreo.por_medir`, `evaluar` y `estados`).
+  - El mes 1 y el mes 2 por separado, y el total cuando cierra el mes 3. Cada una contra el rango del backtest de su versión, sin umbrales nuevos.
+  - La tabla `monitoreo_desempeno` queda con una fila por corrida × medición. No existía en dev ni en prod, así que se definió de nuevo.
+  - Revisión manual con la misma medición en dos orígenes seguidos.
+- **`results.json`** (`export_results.py` y `results_schema.py`):
+  - `real_hasta`;
+  - `real_horizonte` y `ventanas_real`, nulos mientras no cierran;
+  - `pronostico_anterior`, el pronóstico vigente en cada semana real.
+  - Todo con el mismo factor del índice, y `validar` revisa dónde va cada nulo.
+- **Publicación:** `pages.yml` suma un `schedule` los lunes a las 16:00 UTC (11:00 en Bogotá).
+- **CD:** la acción `reentrenar` (`--params reentrenar=si`).
+- **Calibración** (`make calibrar-drift`): la cobertura del mes con la corrida anterior 1 semana antes, y la detección de una semana nueva rota.
+
+Resultado (29-oct-2026):
+- **Pruebas.** `make lint` pasa, y `make test` da 162 pruebas en verde.
+- **Calibración** con la corrida anterior 1 semana antes, sin cambiar umbrales:
+
+  | Revisión | Orígenes | Mínimo | Avisos | Detenciones | Semana nueva a la mitad se detiene en |
+  |---|---|---|---|---|---|
+  | SKU con stock | 72 | 0,88 | 0 | 0 | 66 de 69 |
+  | Venta entre salidas | 72 | 0,77 | 0 | 0 | 38 de 69 |
+
+  - Con la corrida semanal, la cobertura del mes da menos avisos que con 4 semanas (mínimo 0,70, 1 aviso).
+  - El resto de la calibración sale igual que en la 8b.
+- **Prueba en dev** (29-oct-2026, un jueves). El primer `bundle deploy -t dev` lo rechazó Databricks porque la dependencia de `export` en la condición no decía su rama. Con la rama `false` y `run_if: NONE_FAILED`, desplegó.
+
+  | Corrida | Total | Lo que pasó |
+  |---|---|---|
+  | Normal | 5,3 min | Sin freno (el `results.json` de la fase 9 no traía `real_hasta`). `monitoreo_desempeno` publicó `reentrenar = false`: 0 semanas desde el 12-oct y ninguna ventana cerrada. `train` y `predict` quedaron excluidos y `export` corrió. |
+  | La misma otra vez | 1,5 min | `ingest` se detuvo con `SinSemanaNueva`: venta y stock al 18-oct, y lo publicado ya llegaba al 18-oct. El resto se saltó. |
+  | `reentrenar=si` | 41,1 min | Sin freno. `train` (35,9 min) registró la versión 4 de `tesis_dev.demanda_forecast` como champion, con las métricas de la fase 6 (WAPE tipo × mes 43,8 %). `predict` agregó la corrida 2026-10-29 06:12:58 (7.424 filas) y `export` la publicó. |
+
+  - **Los task values funcionan en un `spark_python_task`.** La documentación solo los describe en notebooks; la rama elegida en las dos corridas lo confirma.
+  - `monitoreo_desempeno` dejó 6 mediciones pendientes: las 2 corridas anteriores del 12-oct × 3. La primera, el mes 1, cierra el 18-nov.
+  - `output/datos/` de `tesis_dev`, descargado, pasa la validación.
+    - Trae el origen 12-oct, con la corrida de las 06:12:58 y la versión 4.
+    - En dev, `real_horizonte`, `ventanas_real` y `pronostico_anterior` quedan nulos: los datos de dev no pasan del 18-oct y no hay un origen anterior al 12-oct. Los valores los cubren las pruebas.
+  - **Serverless reintenta una tarea que falla, aunque la falla sea a propósito.** En la corrida frenada, `ingest` corrió dos veces (0,9 y 0,5 min).
+    - Por eso `ingest` y `monitoreo_datos` llevan `disable_auto_optimization: true`. En `monitoreo_datos`, un drift extremo repetido escribiría sus revisiones dos veces.
+    - Databricks lo aceptó en serverless. En la corrida frenada siguiente, `ingest` corrió una sola vez (intento 0) y la corrida tardó 1,3 min.
+  - `predicciones` de dev tiene `appendOnly`, así que la corrida nueva solo se agregó. En la corrida normal, `monitoreo_desempeno` todavía leía las del 12-oct de las 16:28:09 (versión 2) y las 17:47:13 (versión 3). No se volvió a consultar la tabla después.
 
 ---
 

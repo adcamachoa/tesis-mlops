@@ -193,13 +193,14 @@ def calibrar(datos: dict[str, pd.DataFrame]) -> None:
 
 
 def calibrar_mes(panel: pd.DataFrame) -> None:
-    """Cobertura del mes en cada origen semanal, con la corrida anterior 4, 5 o 13 semanas antes (13 es la primera
-    corrida de enero en prod), y qué tan seguido detecta un mes entero o una semana a medias."""
+    """Cobertura del mes en cada origen semanal, con la corrida anterior 1, 4, 5 o 13 semanas antes (1 es la corrida
+    semanal; 13, la primera corrida con monitoreo en prod), y qué tan seguido detecta un mes entero o una semana a
+    medias."""
     print("\nCobertura del mes: la semana nueva más baja contra la más baja de las 4 que revisó la corrida anterior\n")
     filas, detecciones = [], []
     for variable, serie in series_mes(panel).items():
         nulo_es_cero = variable == "skus_con_stock"
-        for salto in (4, 5, 13):
+        for salto in (1, 4, 5, 13):
             desde = INICIO_STOCK_COMPLETO + pd.Timedelta(weeks=salto + monitoreo.SEMANAS_REVISADAS - 1)
             origenes = serie.index[serie.index >= desde]
             valores = pd.Series({o: monitoreo.cobertura_mes(serie, o, o - pd.Timedelta(weeks=salto), nulo_es_cero)
@@ -214,20 +215,24 @@ def calibrar_mes(panel: pd.DataFrame) -> None:
                 "más bajos": ", ".join(f"{o.date()} {v:.2f}" for o, v in bajos.items()),
             })
         origenes = serie.index[serie.index >= INICIO_STOCK_COMPLETO + pd.Timedelta(weeks=7)]
-        for rotura, semanas, f in (("mes entero a la mitad", range(4), 0.5), ("mes entero al 70 %", range(4), 0.7),
-                                   ("una semana a la mitad", [2], 0.5)):
+        for salto, rotura, semanas, f in (
+            (4, "mes entero a la mitad", range(4), 0.5), (4, "mes entero al 70 %", range(4), 0.7),
+            (4, "una semana a la mitad", [2], 0.5), (1, "la semana nueva a la mitad", [0], 0.5),
+            (1, "la semana nueva al 70 %", [0], 0.7),
+        ):
             valores = []
             for o in origenes:
                 rota = serie.copy()
                 for k in semanas:
                     rota.loc[o - pd.Timedelta(weeks=k)] *= f
-                valores.append(monitoreo.cobertura_mes(rota, o, o - pd.Timedelta(weeks=4), nulo_es_cero))
+                valores.append(monitoreo.cobertura_mes(rota, o, o - pd.Timedelta(weeks=salto), nulo_es_cero))
             valores = pd.Series(valores).dropna()
-            detecciones.append({"revisión": variable, "rotura": rotura, "orígenes": len(valores),
+            detecciones.append({"revisión": variable, "corrida anterior": f"{salto} semanas antes", "rotura": rotura,
+                                "orígenes": len(valores),
                                 "avisos": int((valores <= monitoreo.COBERTURA_AVISO).sum()),
                                 "detenciones": int((valores <= monitoreo.COBERTURA_EXTREMO).sum())})
     print(_tabla(pd.DataFrame(filas)))
-    print("\nDetección con la corrida anterior 4 semanas antes:\n")
+    print("\nDetección de roturas:\n")
     print(_tabla(pd.DataFrame(detecciones)))
 
 
@@ -265,6 +270,16 @@ def spearman(x: pd.Series, y: pd.Series) -> tuple[float, float]:
     return rho, float(np.mean(np.abs(nulas) >= abs(rho) - 1e-12))
 
 
+def _con_tres_ventanas(ventanas: pd.DataFrame, rango: dict[str, float]) -> dict:
+    """La regla de la fase 8b, con que se hizo esta demostración: el pronóstico se mide cuando cierran sus tres
+    ventanas, con alerta si se sale cualquiera de las métricas de alerta. Junta las tres mediciones de
+    common.monitoreo."""
+    partes = [monitoreo.evaluar(ventanas, rango, m) for m in monitoreo.MEDICIONES]
+    metricas = {m: next((p[m] for p in partes if pd.notna(p[m])), np.nan) for m in monitoreo.METRICAS_VIVO}
+    fuera = [p["fuera_de_rango"] for p in partes if p["fuera_de_rango"]]
+    return metricas | rango | {"fuera_de_rango": ",".join(fuera), "alerta": bool(fuera)}
+
+
 def demo(datos: dict[str, pd.DataFrame]) -> None:
     """Los 8 orígenes del backtest de dev y prod como corridas en vivo: el drift de datos de cada uno, su error medido
     contra el rango del backtest que esa corrida habría hecho, y si los orígenes con más drift tuvieron más error."""
@@ -282,11 +297,11 @@ def demo(datos: dict[str, pd.DataFrame]) -> None:
     medidas = []
     for o in vivos:
         del_backtest = por_origen.loc[del_rango[o]]
-        medida = monitoreo.evaluar(ventanas[ventanas["origen"] == o], monitoreo.rango_backtest(del_backtest))
+        medida = _con_tres_ventanas(ventanas[ventanas["origen"] == o], monitoreo.rango_backtest(del_backtest))
         mediana = del_backtest[backtest.CRITERIO].median()
         medidas.append(medida | {"origen": o, "fecha_corrida": o, "relativo": medida[backtest.CRITERIO] / mediana})
     medidas = pd.DataFrame(medidas)
-    medidas["estado"] = monitoreo.estados(medidas)
+    medidas["estado"] = monitoreo.estados(medidas.assign(medicion="tres ventanas"))
 
     revisadas = revisiones(datos, todos)
     controladas = _psi_maximo(revisadas, CONTROLADAS)

@@ -2,13 +2,21 @@
 
 Funciones puras sobre pandas. Cada regla devuelve la lista de problemas que encontró, en vez de cortar en el primero;
 `validar` junta los de todas las tablas y lanza ErrorValidacion con un solo mensaje.
+
+Cada lunes llega una exportación nueva con corte al domingo. Antes de validarla, `revisar_semana_nueva` detiene la
+corrida si los datos no traen un domingo nuevo, y `revisar_llave` si la llave de los productos parece regenerada.
 """
 from dataclasses import dataclass
 
 import pandas as pd
 
+from common.features import JERARQUIA, ultima_semana_completa
+
 FECHA_MINIMA = pd.Timestamp("2024-01-01")
 EJEMPLOS = 3  # filas de ejemplo en cada problema
+LLAVE = ("estilo", "estilo_color")
+# el catálogo se edita y un SKU puede cambiar de estilo; más del 1 % a la vez es una llave regenerada
+CAMBIO_LLAVE_MAXIMO = 0.01
 
 
 @dataclass(frozen=True)
@@ -176,6 +184,76 @@ def validar_tabla(nombre: str, df: pd.DataFrame, hoy: pd.Timestamp) -> list[str]
     if nombre == "calendario_eventos":
         problemas += revisar_periodos(df)
     return problemas
+
+
+class SinSemanaNueva(Exception):
+    """Los datos del Volume no traen un domingo nuevo respecto de la última corrida publicada."""
+
+
+def revisar_semana_nueva(corte_venta: pd.Timestamp, corte_stock: pd.Timestamp, real_hasta: pd.Timestamp | None) -> str:
+    """El freno de la corrida semanal: el último domingo completo de la venta y del stock (el corte de features) tiene
+    que ser posterior a `real_hasta`, hasta donde llegó la venta real del último export. Si no, lanza SinSemanaNueva,
+    antes de gastar la corrida. Sin `real_hasta`, como en la primera corrida semanal, no hay freno. Devuelve qué pasó,
+    para el log.
+
+    Se compara con el último export y no con las tablas bronze: una corrida que falló después de la ingesta no lo
+    actualizó, así que repetirla pasa el freno.
+    """
+    domingo = ultima_semana_completa(min(corte_venta, corte_stock)) + pd.Timedelta(days=6)
+    if real_hasta is None:
+        return f"datos hasta el domingo {domingo.date()}; sin una corrida publicada con qué comparar"
+    if domingo > real_hasta:
+        return f"semana nueva: datos hasta el domingo {domingo.date()}, y lo publicado llega al {real_hasta.date()}"
+    raise SinSemanaNueva(
+        f"Los datos del Volume no traen un domingo nuevo: la venta llega al {corte_venta.date()} y el stock al "
+        f"{corte_stock.date()}, y la última corrida ya publicó hasta el {real_hasta.date()}. El job se detiene sin "
+        f"gastar la corrida: sube los parquet con corte al domingo y córrelo de nuevo."
+    )
+
+
+def comparar_productos(anteriores: pd.DataFrame, nuevos: pd.DataFrame) -> dict[str, int]:
+    """Los productos ya cargados (`anteriores`) contra los de la exportación nueva: cuántos SKU había, cuántos faltan,
+    cuántos cambiaron de estilo o estilo_color, cuántos cambiaron de jerarquía y cuántos son nuevos."""
+    columnas = ["sku", *LLAVE, *JERARQUIA]
+    juntos = anteriores[columnas].merge(nuevos[columnas], on="sku", how="left", suffixes=("", "_nuevo"),
+                                        indicator=True)
+    presentes = juntos[juntos["_merge"] == "both"]
+
+    def cambiaron(grupo) -> int:
+        antes = presentes[list(grupo)].to_numpy()
+        despues = presentes[[f"{c}_nuevo" for c in grupo]].to_numpy()
+        return int((antes != despues).any(axis=1).sum())
+
+    return {
+        "existentes": len(anteriores),
+        "faltantes": int((juntos["_merge"] == "left_only").sum()),
+        "cambio_llave": cambiaron(LLAVE),
+        "cambio_jerarquia": cambiaron(JERARQUIA),
+        "nuevos": int((~nuevos["sku"].isin(anteriores["sku"])).sum()),
+    }
+
+
+def revisar_llave(conteo: dict[str, int]) -> list[str]:
+    """Los problemas de la llave (`comparar_productos`): que falte algún SKU que ya estaba, o que más del 1 % de los
+    existentes cambie de estilo o estilo_color, como pasaría con una llave regenerada. La exportación reutiliza la
+    llave: los cambios sueltos son ediciones del catálogo y solo van al log."""
+    problemas = []
+    if conteo["faltantes"]:
+        problemas.append(f"productos: faltan {conteo['faltantes']:,} SKU que ya estaban cargados")
+    parte = conteo["cambio_llave"] / conteo["existentes"] if conteo["existentes"] else 0.0
+    if parte > CAMBIO_LLAVE_MAXIMO:
+        problemas.append(
+            f"productos: {conteo['cambio_llave']:,} de {conteo['existentes']:,} SKU cambiaron de estilo o estilo_color "
+            f"({parte:.1%}), más del {CAMBIO_LLAVE_MAXIMO:.0%}: la llave parece regenerada"
+        )
+    return problemas
+
+
+def describir_productos(conteo: dict[str, int]) -> str:
+    """Los cambios del catálogo en una línea, solo con conteos."""
+    return (f"productos: {conteo['existentes']:,} SKU cargados, {conteo['nuevos']:,} nuevos, {conteo['faltantes']:,} "
+            f"faltantes, {conteo['cambio_llave']:,} con otro estilo o estilo_color y {conteo['cambio_jerarquia']:,} "
+            f"con otra jerarquía")
 
 
 def validar(

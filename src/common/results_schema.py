@@ -3,7 +3,9 @@ escribe src/export_results.py y los lee la página de tesis-mlops-web.
 
 `ESQUEMA` es un JSON Schema (draft 2020-12). `validar` además revisa lo que JSON Schema no alcanza: que no haya números
 no finitos, que cada serie traiga tantas semanas reales como `semanas.real`, que haya un solo total y que la venta real
-del total promedie 100. La página es pública: la venta y el pronóstico van como índice, nunca en piezas.
+del total promedie 100. También que la venta real del horizonte (`real_horizonte` y `ventanas_real`) traiga valor
+exactamente en las semanas y ventanas que cerraron hasta `real_hasta`, y que el pronóstico anterior cubra las mismas
+semanas en todas las series. La página es pública: la venta y el pronóstico van como índice, nunca en piezas.
 
 `ESQUEMA_MANIFEST` y `validar_manifest` siguen las reglas de revisarManifest de tesis-mlops-web (docs/js/datos.js): si
 la web cambia sus reglas, se cambian aquí también. `validar_manifest` revisa además que cada entrada tenga su
@@ -17,7 +19,7 @@ import argparse
 import json
 import math
 from collections import Counter
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -54,6 +56,7 @@ _TEXTO = {"type": "string", "minLength": 1}
 _FECHA = {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}$", "format": "fecha"}
 _FECHA_HORA = {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$", "format": "fecha_hora"}
 _INDICE = {"type": "number", "minimum": 0}
+_INDICE_O_NULO = {"type": ["number", "null"], "minimum": 0}  # nulo donde todavía no se conoce
 _METRICA = {"type": ["number", "null"]}  # nula si no se puede calcular, por ejemplo un MAPE sin celdas con venta
 _ID = {"type": "string", "pattern": r"^[a-z0-9-]+$"}  # va en la dirección de la página: …/#2026-10-12
 # relativa al manifest, con la expresión de la página: cada parte empieza con letra o número, así que no hay "..", "/"
@@ -77,6 +80,7 @@ ESQUEMA = {
             "version_esquema": {"const": VERSION},
             "generado": _FECHA_HORA,
             "escala": {"const": ESCALA},
+            "real_hasta": _FECHA,  # el último domingo con venta real: llega más allá del origen en las semanas cerradas
             "corrida": _objeto(
                 {"fecha_prediccion": _FECHA_HORA, "fecha_entrenamiento": _FECHA_HORA, "origen": _FECHA,
                  "datos_hasta": _FECHA}
@@ -106,6 +110,11 @@ ESQUEMA = {
                         "real": _lista(_INDICE),
                         "pronostico": _lista(_INDICE, HORIZONTE),
                         "ventanas": _lista(_INDICE, len(VENTANAS_DIAS)),
+                        # la venta real de cada semana y ventana pronosticada, nula mientras no cierra
+                        "real_horizonte": _lista(_INDICE_O_NULO, HORIZONTE),
+                        "ventanas_real": _lista(_INDICE_O_NULO, len(VENTANAS_DIAS)),
+                        # en cada semana real, el pronóstico vigente de un origen anterior; nulo si no hubo
+                        "pronostico_anterior": _lista(_INDICE_O_NULO),
                     }
                 )
             ),
@@ -162,9 +171,28 @@ def validar(resultados: dict) -> None:
         raise ErrorEsquema(problemas)
 
     semanas = len(resultados["semanas"]["real"])
+    real_hasta = date.fromisoformat(resultados["real_hasta"])
+    if real_hasta < date.fromisoformat(resultados["corrida"]["datos_hasta"]):
+        problemas.append("real_hasta es anterior a datos_hasta")
+    # dónde tiene que haber valor: las semanas y ventanas que cerraron hasta real_hasta
+    conocidas = {
+        "real_horizonte": [date.fromisoformat(s) + timedelta(days=6) <= real_hasta
+                           for s in resultados["semanas"]["pronostico"]],
+        "ventanas_real": [date.fromisoformat(v["hasta"]) <= real_hasta for v in resultados["ventanas"]],
+    }
+    cubiertas = None  # las semanas con pronóstico anterior, las mismas en todas las series
     for serie in resultados["series"]:
-        if len(serie["real"]) != semanas:
-            problemas.append(f"la serie {serie['nombre']} trae {len(serie['real'])} semanas reales y no {semanas}")
+        nombre = serie["nombre"]
+        for campo in ("real", "pronostico_anterior"):
+            if len(serie[campo]) != semanas:
+                problemas.append(f"la serie {nombre} trae {len(serie[campo])} semanas en {campo} y no {semanas}")
+        for campo, esperadas in conocidas.items():
+            if [v is not None for v in serie[campo]] != esperadas:
+                problemas.append(f"la serie {nombre} no trae {campo} justo en lo que cerró hasta real_hasta")
+        mascara = [v is not None for v in serie["pronostico_anterior"]]
+        if cubiertas is not None and mascara != cubiertas:
+            problemas.append(f"la serie {nombre} trae pronostico_anterior en otras semanas que la primera serie")
+        cubiertas = mascara if cubiertas is None else cubiertas
     totales = [s for s in resultados["series"] if s["nivel"] == "total"]
     if len(totales) != 1:
         problemas.append(f"tiene que haber una sola serie total y hay {len(totales)}")
