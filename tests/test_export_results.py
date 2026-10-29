@@ -1,7 +1,8 @@
 """Pruebas de src/export_results.py y common.results_schema: un results.json por origen, con su última corrida y las
-métricas del train de su versión; la venta como índice; la venta real de las semanas y ventanas pronosticadas que ya
-cerraron, y el pronóstico vigente de los orígenes anteriores; regenerar un origen viejo con datos posteriores solo
-agrega esa venta real; el manifest con las reglas de la página, y no se escribe nada si algo falla."""
+métricas del train de su versión; el árbol de la jerarquía, con las métricas del backtest sumadas a cada nodo; la venta
+como índice; la venta real de las semanas y ventanas pronosticadas que ya cerraron, y el pronóstico vigente de los
+orígenes anteriores; regenerar un origen viejo con datos posteriores solo agrega esa venta real; el manifest con las
+reglas de la página, y no se escribe nada si algo falla."""
 import copy
 import json
 import re
@@ -12,7 +13,7 @@ import pytest
 
 from common import backtest, metrics
 from common.modelos import MediaMovil, NaiveEstacional
-from common.results_schema import ErrorEsquema, validar, validar_carpeta, validar_manifest
+from common.results_schema import METRICAS_NODO, ErrorEsquema, validar, validar_carpeta, validar_manifest
 from export_results import (
     DECIMALES_INDICE,
     SEMANAS_REALES,
@@ -51,6 +52,8 @@ def tablas(sinteticos) -> dict:
     origenes = backtest.origenes(ultima, n=2)
     candidatos = {"naive_estacional": NaiveEstacional(), "media_movil_8": MediaMovil(8)}
     del_backtest = backtest.correr(candidatos, sinteticos["base"], origenes)
+    # el train viejo hizo su backtest con lo que se sabía en su origen: sus ventanas cierran antes
+    del_backtest_viejo = backtest.correr(candidatos, sinteticos["base"], backtest.origenes(ultima - ANTES, n=2))
     resumen = pd.DataFrame(
         {n: metrics.formato_estandar(metrics.a_ventanas(p, sinteticos["venta_diaria"]))
          for n, p in del_backtest.groupby("modelo")}
@@ -75,6 +78,10 @@ def tablas(sinteticos) -> dict:
             ignore_index=True,
         ),
         "runs": {3: "train-viejo/media_movil_8", 4: "train-nuevo/media_movil_8"},
+        # el artefacto del backtest de cada modelo en cada train
+        "backtests": {f"{run}/{modelo}": p for run, de_run in (("train-viejo", del_backtest_viejo),
+                                                                ("train-nuevo", del_backtest))
+                      for modelo, p in de_run.groupby("modelo")},
         "resumen": resumen,
         "predicciones": pd.concat(
             [_prediccion(sinteticos, ultima - ANTES, PREDICCION - ANTES, 3),
@@ -88,11 +95,11 @@ def tablas(sinteticos) -> dict:
     }
 
 
-def _publicar(tablas, generado=GENERADO, top=20, **cambios) -> tuple[dict, dict[str, dict]]:
+def _publicar(tablas, generado=GENERADO, minimo=0.5, **cambios) -> tuple[dict, dict[str, dict]]:
     """construir_publicacion con las tablas de `tablas`, salvo las que vienen en `cambios`."""
-    t = {k: tablas[k] for k in ("metricas", "predicciones", "panel", "venta_diaria", "runs")} | cambios
-    return construir_publicacion(t["metricas"], t["predicciones"], t["panel"], t["venta_diaria"], t["runs"], generado,
-                                 top)
+    t = {k: tablas[k] for k in ("metricas", "predicciones", "panel", "venta_diaria", "runs", "backtests")} | cambios
+    return construir_publicacion(t["metricas"], t["predicciones"], t["panel"], t["venta_diaria"], t["runs"],
+                                 t["backtests"], generado, minimo)
 
 
 @pytest.fixture(scope="module")
@@ -135,14 +142,16 @@ def test_un_results_json_por_origen_y_el_manifest(tablas, publicacion, tmp_path)
         assert json.loads(escritos[f"datos/{ruta}"]) == contenido
     # el results.json de siempre es el mismo archivo del origen más reciente
     assert escritos["results.json"] == escritos[f"datos/{tablas['nuevo']}"]
+    # los results.json van compactos, sin sangría; el manifest, legible
+    assert "\n" not in escritos["results.json"] and "\n" in escritos["datos/manifest.json"]
     nuevo, viejo = (tablas[o].removesuffix("/results.json") for o in ("nuevo", "viejo"))
     assert manifest == {
         "version_manifest": 1,
         "generado": "2026-05-20T09:00:00",
         "pronosticos": [
-            {"id": nuevo, "ruta": f"{nuevo}/results.json", "version_esquema": 1, "origen": nuevo,
+            {"id": nuevo, "ruta": f"{nuevo}/results.json", "version_esquema": 2, "origen": nuevo,
              "fecha_prediccion": "2026-05-20T08:30:00"},
-            {"id": viejo, "ruta": f"{viejo}/results.json", "version_esquema": 1, "origen": viejo,
+            {"id": viejo, "ruta": f"{viejo}/results.json", "version_esquema": 2, "origen": viejo,
              "fecha_prediccion": "2026-03-25T08:30:00"},
         ],
     }
@@ -150,6 +159,7 @@ def test_un_results_json_por_origen_y_el_manifest(tablas, publicacion, tmp_path)
 
 def test_results_json_cumple_el_esquema(resultados):
     validar(resultados)
+    assert resultados["version_esquema"] == 2 and resultados["indice_minimo"] == 0.5
     assert resultados["champion"] == {"modelo": "media_movil_8", "version": 4}
     assert resultados["corrida"]["fecha_prediccion"] == "2026-05-20T08:30:00"
     assert resultados["corrida"]["fecha_entrenamiento"] == "2026-05-20T08:00:00"
@@ -293,23 +303,69 @@ def test_venta_y_pronostico_como_indice(tablas, resultados):
             assert fila[metrica] == pytest.approx(esperado[metrica], abs=1e-4)
 
 
-def test_el_total_es_la_suma_de_las_submarcas(resultados):
-    total, *resto = resultados["series"]
-    submarcas = [s for s in resto if s["nivel"] == "submarca"]
-    assert [s["nombre"] for s in submarcas] == ["Submarca A", "Submarca B"]
-    for campo in ("real", "pronostico", "ventanas"):
-        suma = np.sum([s[campo] for s in submarcas], axis=0)
-        np.testing.assert_allclose(total[campo], suma, atol=REDONDEO * (len(submarcas) + 1))
+def _nodos(resultados: dict) -> dict[str, dict]:
+    return {nodo["id"]: nodo for nodo in resultados["series"]}
 
 
-def test_las_series_de_mas_venta(tablas, resultados):
-    venta = _venta_real(tablas, resultados).groupby("serie")["venta"].sum().sort_values(ascending=False)
-    pocas = _publicar(tablas, top=2)[1][tablas["nuevo"]]
-    assert [s["nombre"] for s in pocas["series"] if s["nivel"] == "serie"] == venta.index[:2].tolist()
-    # con el tope de 20 entran todas las que tienen pronóstico, y no la que dejó de vender
-    todas = [s["nombre"] for s in resultados["series"] if s["nivel"] == "serie"]
-    assert sorted(todas) == sorted(_del_origen(tablas["predicciones"], resultados)["serie"].unique())
-    assert len(todas) == 3
+def test_el_arbol_publica_lo_que_llega_al_minimo(tablas, resultados):
+    """La serie que dejó de vender (Tipo 4) no llega al mínimo. Su resto tampoco, así que se junta con su única
+    hermana publicada (Tipo 3): Cat 2 no se desglosa, y sus hijos nunca dejan un resto que se pueda derivar."""
+    assert [(n["id"], n["padre"], n["nivel"]) for n in resultados["series"]] == [
+        ("total", None, "total"),
+        ("submarca-a", "total", "submarca"),
+        ("submarca-a/depto-1", "submarca-a", "departamento"),
+        ("submarca-a/depto-1/cat-1", "submarca-a/depto-1", "categoria"),
+        ("submarca-a/depto-1/cat-1/tipo-2", "submarca-a/depto-1/cat-1", "serie"),
+        ("submarca-a/depto-1/cat-1/tipo-1", "submarca-a/depto-1/cat-1", "serie"),
+        ("submarca-b", "total", "submarca"),
+        ("submarca-b/depto-2", "submarca-b", "departamento"),
+        ("submarca-b/depto-2/cat-2", "submarca-b/depto-2", "categoria"),
+    ]
+    nodos = _nodos(resultados)
+    assert (nodos["submarca-b/depto-2"]["nombre"], nodos["submarca-b/depto-2"]["etiqueta"]) == (
+        "Submarca B | Depto 2", "Depto 2")
+    # las series se llaman como su clave, igual que en la versión 1
+    series = [n["nombre"] for n in resultados["series"] if n["nivel"] == "serie"]
+    assert sorted(series) == ["Submarca A | Depto 1 | Cat 1 | Tipo 1", "Submarca A | Depto 1 | Cat 1 | Tipo 2"]
+
+
+def test_cada_nodo_suma_a_sus_hijos(resultados):
+    nodos, hijos = _nodos(resultados), {}
+    for nodo in resultados["series"]:
+        if nodo["padre"]:
+            hijos.setdefault(nodo["padre"], []).append(nodo)
+    for padre, de_padre in hijos.items():
+        for campo in ("real", "pronostico", "ventanas"):
+            suma = np.sum([h[campo] for h in de_padre], axis=0)
+            np.testing.assert_allclose(nodos[padre][campo], suma, atol=REDONDEO * (len(de_padre) + 1))
+
+
+def test_las_metricas_de_cada_nodo_salen_de_su_backtest_sumado_al_nodo(tablas, publicacion):
+    """En una serie, el formato estándar de esa serie sola; en el total, el WAPE y el sesgo del total. Cada origen usa
+    el backtest del train de su versión."""
+    for archivo, train in (("nuevo", "train-nuevo"), ("viejo", "train-viejo")):
+        resultados = publicacion[1][tablas[archivo]]
+        nodos = _nodos(resultados)
+        modelos = [m["modelo"] for m in resultados["metricas"]]
+        assert all([m["modelo"] for m in n["metricas"]] == modelos for n in resultados["series"])
+        for modelo in modelos:
+            ventanas = metrics.a_ventanas(tablas["backtests"][f"{train}/{modelo}"], tablas["venta_diaria"])
+            de = {m["modelo"]: m for m in nodos["submarca-a/depto-1/cat-1/tipo-1"]["metricas"]}[modelo]
+            esperado = metrics.formato_estandar(ventanas[ventanas["serie"] == "Submarca A | Depto 1 | Cat 1 | Tipo 1"])
+            for m in METRICAS_NODO:
+                assert de[m] == pytest.approx(esperado[m], abs=1e-4), (archivo, modelo, m)
+            total = {m["modelo"]: m for m in nodos["total"]["metricas"]}[modelo]
+            mes_1 = ventanas[ventanas["ventana"] == 1].groupby("origen")[["real", "pronostico"]].sum()
+            assert total["wape_m1"] == pytest.approx(
+                (mes_1["real"] - mes_1["pronostico"]).abs().sum() / mes_1["real"].sum(), abs=1e-4)
+            assert total["sesgo_total"] == pytest.approx(
+                ventanas["pronostico"].sum() / ventanas["real"].sum() - 1, abs=1e-4)
+
+
+def test_sin_el_backtest_de_un_modelo_no_se_exporta(tablas):
+    sin_uno = {k: v for k, v in tablas["backtests"].items() if k != "train-nuevo/naive_estacional"}
+    with pytest.raises(ValueError, match="falta el backtest del run train-nuevo/naive_estacional"):
+        _publicar(tablas, backtests=sin_uno)
 
 
 def test_el_error_de_la_venta_en_piezas_no_muestra_la_venta(resultados):
@@ -336,6 +392,20 @@ CAMBIOS = {
     "pronóstico anterior en otras semanas": (lambda r: r["series"][1]["pronostico_anterior"].__setitem__(0, 1.0),
                                              "pronostico_anterior en otras semanas"),
     "real_hasta antes del origen": (lambda r: r.update(real_hasta="2020-01-05"), "real_hasta es anterior"),
+    # el árbol
+    "id repetido": (lambda r: r["series"][2].update(id=r["series"][1]["id"]), "aparece dos veces"),
+    "padre que no existe": (lambda r: r["series"][-1].update(padre="no-existe"), "no está en el árbol"),
+    "total con padre": (lambda r: r["series"][0].update(padre="submarca-a"), "es el total y tiene padre"),
+    "nivel que no le toca": (lambda r: r["series"][-1].update(nivel="departamento"), "no puede colgar"),
+    "nodo bajo el mínimo": (lambda r: r["series"][-1].update(real=[0.1] * len(r["series"][-1]["real"]),
+                                                            pronostico=[0.1] * 13), "no llega al índice mínimo"),
+    "hijos que suman más": (lambda r: r["series"][-1].update(real=[v + 50 for v in r["series"][-1]["real"]]),
+                            "no suman el nodo en real"),
+    # restar los hijos al padre dejaría ver lo que no se publicó
+    "hijos que suman menos": (lambda r: r["series"][4]["real"].__setitem__(0, 0.0), "no suman el nodo en real"),
+    "venta del horizonte que no cuadra": (lambda r: r["series"][4]["real_horizonte"].__setitem__(0, 0.0),
+                                          "no suman el nodo en real_horizonte"),
+    "métricas de otros modelos": (lambda r: r["series"][3]["metricas"].pop(), "mismos modelos"),
 }
 
 

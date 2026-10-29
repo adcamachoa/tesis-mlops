@@ -21,7 +21,7 @@ El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer e
   - Los secretos solo van en los pasos que los usan, y nunca en jobs que ejecuten código de un PR de fork.
   - El usuario de Databricks se oculta en el log con `::add-mask::`, y las acciones van fijadas por commit.
 - **El bundle solo declara el job `demanda_pipeline`.** No agregues a `databricks.yml` schemas, volúmenes, tablas ni modelos como recursos, porque `deploy` y `destroy` podrían cambiarlos o borrarlos. `tests/test_bundle.py` lo verifica.
-- **No se borran versiones del modelo en Unity Catalog.** El export las necesita para regenerar los orígenes: liga cada pronóstico con su train por el run de su versión. Sin la versión, el export falla y no publica nada.
+- **No se borran versiones del modelo en Unity Catalog ni los runs de MLflow de train.** El export las necesita para regenerar los orígenes: liga cada pronóstico con su train por el run de su versión, y saca las métricas por nodo del artefacto `predicciones_backtest.parquet` del run de cada modelo. Sin la versión o sin el artefacto, el export falla y no publica nada.
 
 ## Datos
 
@@ -146,12 +146,12 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - **Solo crece:** tiene `delta.appendOnly = true`, así que Delta rechaza reemplazarla, borrar filas o editarlas. Para borrar una corrida de prueba hay que quitar la propiedad a propósito.
   - La corrida del 2026-10-28 16:28:09 en `tesis_dev`, que se mide en enero de 2027, tiene además un respaldo en `workspace.tesis_dev.predicciones_respaldo_20261028`, también con `appendOnly`.
 - **Datos de la página.** La tarea export escribe en `/Volumes/workspace/<schema>/raw/output/`:
-  - `datos/<origen>/results.json`: uno por origen de `predicciones`, con su última corrida. Su esquema está en `src/common/results_schema.py` (`version_esquema` 1).
+  - `datos/<origen>/results.json`: uno por origen de `predicciones`, con su última corrida, en JSON compacto. Su esquema está en `src/common/results_schema.py` (`version_esquema` 2 desde la fase 9c).
   - `datos/manifest.json`: una entrada por origen, en el formato 1 del README de `tesis-mlops-web`. `validar_manifest` sigue las reglas de `revisarManifest` de la web (`docs/js/datos.js`); si la web las cambia, se cambian aquí también.
   - `results.json`: el mismo archivo del origen más reciente.
   - En cada corrida vuelve a generar todos los orígenes desde las tablas. Valida todo en memoria antes de escribir: si algo falla, no escribe nada.
 - **El pronóstico de cada origen se arma solo con datos hasta su `datos_hasta`.**
-  - Venta real: las 52 semanas hasta el origen. Las posteriores no entran en el factor del índice ni en la elección de las 20 series.
+  - Venta real: las 52 semanas hasta el origen. Las posteriores no entran en el factor del índice ni en qué nodos se publican.
   - Pronóstico: la última corrida de ese origen.
   - Métricas: las de la corrida de `metricas_modelos` que registró la versión que pronosticó, cuyo `run_id_modelo` es el run de esa versión en Unity Catalog. Nunca las de un train posterior.
   - `pronostico_anterior`: en cada una de las 52 semanas reales, el pronóstico que estaba vigente. Es el de la última corrida del origen anterior más reciente que la cubría, o nulo si no hubo.
@@ -161,9 +161,36 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - En las semanas sin reentrenamiento, el pronóstico publicado no cambia: solo se agregan esas semanas reales.
   - Al regenerar un origen viejo, el archivo sale igual salvo `generado`, `real_hasta`, `real_horizonte` y `ventanas_real`. Cada origen queda fijo cuando cierran sus 13 semanas.
   - Si un refresco corrige la venta de semanas pasadas, la venta real de un origen viejo cambia al regenerarlo. El pronóstico y las métricas no cambian.
-- **Los campos nuevos van en la versión 1.** Son `real_hasta`, `real_horizonte`, `ventanas_real` y `pronostico_anterior`.
-  - Ningún campo anterior cambia de significado, y la página ignora los que no conoce.
-  - `validar` los exige, así que `generar_ejemplo.py` de la web tiene que agregarlos.
+- **El árbol de la jerarquía (versión 2, fase 9c).** `series` trae el total → submarca → departamento → categoría → serie (tipo de producto), en profundidad, más nodos `otras` (`common/arbol.py`).
+  - **Campos de cada nodo:**
+    - `id`: la ruta en minúsculas y guiones, estable entre orígenes;
+    - `padre`: el `id` del padre, nulo en el total;
+    - `nivel`;
+    - `nombre`: el completo, como el de las series en la versión 1;
+    - `etiqueta`: el del nodo solo.
+  - **Qué nodo se publica.** Uno cuyo índice promedio semanal de venta real en las 52 semanas llega a `indice_minimo` (0,5), y cuyo padre se publicó.
+    - **Los hijos de un nodo desglosado siempre suman el nodo.** Si no, restar los hijos al padre dejaría ver lo que no se publicó.
+      - Los hijos que no llegan van juntos a un nodo `otras`.
+      - Si su suma no llega al mínimo, se les junta el hijo publicado más chico, con todo lo suyo. Si así no queda ningún otro hijo, el nodo no se desglosa.
+      - Es así aunque el resto no haya vendido, para que el árbol de un origen no cambie cuando llegan semanas nuevas.
+    - **El mínimo protege la escala.** En el 12-oct, la exposición se mide como los valores semanales publicados o derivables que vienen de 1 a 3 piezas:
+      - con esta regla, 0,41 %, sin restos derivables, en 118 nodos;
+      - las 20 series de la versión 1 daban 1,9 %;
+      - con un mínimo de 0,2 serían 3,7 %;
+      - con los restos sin juntar, como en la primera versión del PR, 3,12 %;
+      - publicando también por el pronóstico, 2,24 %. Por eso tampoco se publica por el pronóstico.
+  - **Las métricas de cada nodo** (`series[].metricas`) son, para los 6 modelos y en el orden de `metricas`:
+    - WAPE M1, M2 y total, MAPE M1, M2 y total (como dato) y sesgo total;
+    - salen del backtest del train de la versión que pronosticó, con la venta y el pronóstico sumados al nodo por origen y ventana;
+    - sin MAE ni RMSE, que van en piezas.
+    - El WAPE baja al subir de nivel: en dev, la mediana del WAPE total del champion va de 31,3 % en las series a 14,7 % en el total.
+  - **Los 4 campos de la fase 9b** van en cada nodo: `real_hasta`, `real_horizonte`, `ventanas_real` y `pronostico_anterior`.
+  - **`validar` revisa además:**
+    - que los `id` no se repitan y cada padre exista y sea del nivel anterior;
+    - que ningún nodo baje del mínimo;
+    - que los hijos sumen su padre en cada valor, salvo el redondeo;
+    - que cada nodo traiga los modelos de `metricas`.
+  - **Es la versión 2 porque la página de la versión 1 rechaza los niveles nuevos.** El orden de publicación va en la fase 9c de PLAN.md: primero la web que acepta la 1 y la 2.
 - **La página es pública: nunca lleva piezas.** La venta real y el pronóstico van como índice, donde 100 = la venta semanal promedio del total en las 52 semanas mostradas. El factor es el mismo para todas las series, y el MAE y el RMSE se escalan con él.
   - El índice va con 1 decimal. Con más decimales, cada pieza se vería como un escalón fijo y se podría reconstruir la escala.
 - **Publicación.** `pages.yml` descarga `output/datos/` de prod (siempre `tesis`), lo valida con `python -m common.results_schema` y lo publica en GitHub Pages.
@@ -171,6 +198,7 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - Para publicar sin correr el job completo: `gh workflow run cd.yml --ref main -f accion=solo_export` (unos 3 min de cuota).
   - **En un repo público, GitHub desactiva el schedule después de 60 días sin actividad.** Hace falta algún commit antes; por eso PLAN.md pide uno hacia el 15-dic.
 - **La web depende de estos nombres.** `herramientas/generar_ejemplo.py` de `tesis-mlops-web` importa de este repo `results_schema.validar(resultados)` (con un solo argumento), `results_schema.VERSION`, `ESCALA` y `BASE_INDICE`, `features.HORIZONTE`, `metrics.METRICAS` y `metrics.VENTANAS_DIAS`. No se cambian sus nombres ni la firma de `validar`.
+  - Desde la fase 9c, `VERSION` es 2 y `validar` exige el árbol. El generador tiene que armar la versión 2; le sirven `results_schema.METRICAS_NODO`, `arbol.NIVELES` y `arbol.OTRAS`.
 
 ## Monitoreo y drift
 
@@ -263,7 +291,7 @@ src/
   predict.py           pronóstico con el champion → tabla predicciones (solo si toca)
   export_results.py    datos de la página: un results.json por origen y manifest.json
   common/              funciones puras en pandas, con pruebas
-    validation.py  features.py  metrics.py  backtest.py  modelos.py  results_schema.py  monitoreo.py
+    validation.py  features.py  metrics.py  backtest.py  modelos.py  results_schema.py  monitoreo.py  arbol.py
 scripts/               solo en local: simular_monitoreo.py (calibración y demostración del monitoreo)
 tests/                 pruebas (pytest) y tests/data/ (muestra.parquet)
 databricks.yml         Asset Bundle: job semanal demanda_pipeline con la condición toca_reentrenar, targets dev y prod

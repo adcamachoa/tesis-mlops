@@ -28,9 +28,8 @@ from pyspark.sql import functions as F
 
 from common import metrics, monitoreo
 from predict import proteger_solo_agregar
-from train import venta_diaria_serie
+from train import ARTEFACTO_BACKTEST, venta_diaria_serie
 
-ARTEFACTO = "predicciones_backtest.parquet"  # lo deja train.py en el run de cada modelo
 CORRIDA = ["fecha_corrida", "origen", "modelo", "modelo_version"]
 RANGO = [f"{m}_{f}" for m in monitoreo.METRICAS_ALERTA for f in ("min", "max")]
 COLUMNAS = [
@@ -44,7 +43,7 @@ def rango_de_version(cliente: MlflowClient, modelo_uc: str, version: int, venta_
     """El rango del backtest donde se registró `version`, y el run de ese backtest."""
     run_id = cliente.get_model_version(modelo_uc, str(version)).run_id
     with tempfile.TemporaryDirectory() as carpeta:
-        ruta = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=ARTEFACTO, dst_path=carpeta)
+        ruta = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=ARTEFACTO_BACKTEST, dst_path=carpeta)
         del_backtest = pd.read_parquet(ruta)
     del_backtest["origen"] = pd.to_datetime(del_backtest["origen"])
     ventanas = metrics.a_ventanas(del_backtest, venta_diaria)

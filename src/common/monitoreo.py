@@ -399,8 +399,8 @@ def decidir_reentrenamiento(
 
     Una alerta de desempeño no lo adelanta (decisión del 29-oct-2026, en CLAUDE.md). Con orígenes cada 4 semanas, cada
     medición cae 1 semana después de un reentrenamiento programado, así que adelantar solo agregaría 1 semana de
-    datos, y en la demostración no bajó el error. La alerta queda en el log y en la tabla como señal para revisar el
-    modelo.
+    datos. En los 2 disparos de la demostración, el WAPE tipo bajó poco (1,0 y 3,4 puntos), el WAPE total no cambió y
+    el sesgo empeoró. La alerta queda en el log y en la tabla como señal para revisar el modelo.
     """
     if forzado:
         return True, "reentrenar=si"
