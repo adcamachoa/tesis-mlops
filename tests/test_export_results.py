@@ -1,6 +1,7 @@
 """Pruebas de src/export_results.py y common.results_schema: un results.json por origen, con su última corrida y las
-métricas del train de su versión; la venta como índice; regenerar un origen viejo con datos posteriores da el mismo
-archivo; el manifest con las reglas de la página, y no se escribe nada si algo falla."""
+métricas del train de su versión; la venta como índice; la venta real de las semanas y ventanas pronosticadas que ya
+cerraron, y el pronóstico vigente de los orígenes anteriores; regenerar un origen viejo con datos posteriores solo
+agrega esa venta real; el manifest con las reglas de la página, y no se escribe nada si algo falla."""
 import copy
 import json
 import re
@@ -12,15 +13,24 @@ import pytest
 from common import backtest, metrics
 from common.modelos import MediaMovil, NaiveEstacional
 from common.results_schema import ErrorEsquema, validar, validar_carpeta, validar_manifest
-from export_results import DECIMALES_INDICE, SEMANAS_REALES, construir_publicacion, escribir
+from export_results import (
+    DECIMALES_INDICE,
+    SEMANAS_REALES,
+    construir_publicacion,
+    escribir,
+    pronostico_vigente,
+)
 from predict import tabla_predicciones
 
 ENTRENAMIENTO = pd.Timestamp("2026-05-20 08:00:00")
 PREDICCION = pd.Timestamp("2026-05-20 08:30:00")
 GENERADO = pd.Timestamp("2026-05-20 09:00:00")
-ANTES = pd.Timedelta(weeks=4)  # el origen viejo, su train y su predicción
+# el origen viejo, su train y su predicción: con 8 semanas cerradas de su horizonte y su mes 1
+ANTES = pd.Timedelta(weeks=8)
 ESCALA_VIEJA = 1.5  # las métricas del train viejo, para distinguirlas de las del nuevo
 REDONDEO = 0.5 * 10**-DECIMALES_INDICE + 1e-9
+DESPUES_DEL_ORIGEN = ("generado", "real_hasta")  # lo que cambia cuando llegan semanas nuevas, además de la venta real
+VENTA_DEL_HORIZONTE = ("real_horizonte", "ventanas_real")
 
 
 def _prediccion(sinteticos, origen: pd.Timestamp, fecha: pd.Timestamp, version: int, escala: float = 1.0):
@@ -35,7 +45,7 @@ def _prediccion(sinteticos, origen: pd.Timestamp, fecha: pd.Timestamp, version: 
 @pytest.fixture(scope="module")
 def tablas(sinteticos) -> dict:
     """Las tablas como las lee export_results.py, con dos orígenes: el viejo lo pronosticó la versión 3, registrada en
-    un train 4 semanas antes, y el nuevo la versión 4. `runs` es el run de cada versión en Unity Catalog, y `viejo` y
+    un train 8 semanas antes, y el nuevo la versión 4. `runs` es el run de cada versión en Unity Catalog, y `viejo` y
     `nuevo` las rutas de sus results.json."""
     ultima = sinteticos["ultima_semana"]
     origenes = backtest.origenes(ultima, n=2)
@@ -72,14 +82,22 @@ def tablas(sinteticos) -> dict:
             ignore_index=True,
         ),
         "panel": sinteticos["panel"],
+        "venta_diaria": sinteticos["venta_diaria"],
         "viejo": f"{(ultima - ANTES).date()}/results.json",
         "nuevo": f"{ultima.date()}/results.json",
     }
 
 
+def _publicar(tablas, generado=GENERADO, top=20, **cambios) -> tuple[dict, dict[str, dict]]:
+    """construir_publicacion con las tablas de `tablas`, salvo las que vienen en `cambios`."""
+    t = {k: tablas[k] for k in ("metricas", "predicciones", "panel", "venta_diaria", "runs")} | cambios
+    return construir_publicacion(t["metricas"], t["predicciones"], t["panel"], t["venta_diaria"], t["runs"], generado,
+                                 top)
+
+
 @pytest.fixture(scope="module")
 def publicacion(tablas) -> tuple[dict, dict[str, dict]]:
-    return construir_publicacion(tablas["metricas"], tablas["predicciones"], tablas["panel"], tablas["runs"], GENERADO)
+    return _publicar(tablas)
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +113,10 @@ def _del_origen(df: pd.DataFrame, resultados: dict) -> pd.DataFrame:
 def _venta_real(tablas, resultados) -> pd.DataFrame:
     panel = tablas["panel"]
     return panel[panel["semana"].isin(pd.to_datetime(resultados["semanas"]["real"]))]
+
+
+def _factor(tablas, resultados) -> float:
+    return 100 / (_venta_real(tablas, resultados)["venta"].sum() / SEMANAS_REALES)
 
 
 def _contenido(carpeta) -> dict[str, str]:
@@ -121,7 +143,7 @@ def test_un_results_json_por_origen_y_el_manifest(tablas, publicacion, tmp_path)
             {"id": nuevo, "ruta": f"{nuevo}/results.json", "version_esquema": 1, "origen": nuevo,
              "fecha_prediccion": "2026-05-20T08:30:00"},
             {"id": viejo, "ruta": f"{viejo}/results.json", "version_esquema": 1, "origen": viejo,
-             "fecha_prediccion": "2026-04-22T08:30:00"},
+             "fecha_prediccion": "2026-03-25T08:30:00"},
         ],
     }
 
@@ -131,6 +153,7 @@ def test_results_json_cumple_el_esquema(resultados):
     assert resultados["champion"] == {"modelo": "media_movil_8", "version": 4}
     assert resultados["corrida"]["fecha_prediccion"] == "2026-05-20T08:30:00"
     assert resultados["corrida"]["fecha_entrenamiento"] == "2026-05-20T08:00:00"
+    assert resultados["real_hasta"] == resultados["corrida"]["datos_hasta"]  # nada del horizonte cerró todavía
     assert len(resultados["semanas"]["real"]) == SEMANAS_REALES and len(resultados["semanas"]["pronostico"]) == 13
     assert resultados["semanas"]["real"][-1] == resultados["corrida"]["origen"]
     assert [v["dias"] for v in resultados["ventanas"]] == [31, 30, 30]
@@ -146,7 +169,7 @@ def test_cada_origen_con_las_metricas_del_train_de_su_version(tablas, publicacio
     viejo, nuevo = (publicacion[1][tablas[o]] for o in ("viejo", "nuevo"))
     assert viejo["champion"] == {"modelo": "media_movil_8", "version": 3}
     # el origen viejo no toma el train posterior, aunque sea el último de metricas_modelos
-    assert viejo["corrida"]["fecha_entrenamiento"] == "2026-04-22T08:00:00"
+    assert viejo["corrida"]["fecha_entrenamiento"] == "2026-03-25T08:00:00"
     assert nuevo["corrida"]["fecha_entrenamiento"] == "2026-05-20T08:00:00"
     for resultados, escala in ((viejo, ESCALA_VIEJA), (nuevo, 1.0)):
         for fila in resultados["metricas"]:
@@ -154,31 +177,88 @@ def test_cada_origen_con_las_metricas_del_train_de_su_version(tablas, publicacio
             assert fila["wape_total"] == pytest.approx(esperado, abs=1e-4)
 
 
-def test_regenerar_un_origen_viejo_con_datos_posteriores_da_el_mismo_archivo(sinteticos, tablas, publicacion):
+def test_la_venta_real_de_lo_que_ya_cerro_del_horizonte(tablas, publicacion):
+    """Al origen viejo le cerraron 8 de sus 13 semanas y su mes 1: esas traen su venta real, con el mismo factor."""
+    viejo = publicacion[1][tablas["viejo"]]
+    assert viejo["real_hasta"] == f"{(pd.Timestamp(viejo['corrida']['datos_hasta']) + ANTES).date()}"
+    factor = _factor(tablas, viejo)
+    total = viejo["series"][0]
+    panel = tablas["panel"].groupby("semana")["venta"].sum()
+    semanas = pd.to_datetime(viejo["semanas"]["pronostico"])
+    np.testing.assert_allclose(total["real_horizonte"][:8], panel.loc[semanas[:8]] * factor, atol=REDONDEO)
+    assert total["real_horizonte"][8:] == [None] * 5
+    # la venta real por mes sale de la venta diaria, como el error; el mes 2 todavía no cierra
+    por_ventana = metrics.real_por_ventana(tablas["venta_diaria"], pd.Timestamp(viejo["corrida"]["origen"]))
+    assert total["ventanas_real"][0] == pytest.approx(por_ventana.xs(1, level="ventana").sum() * factor, abs=REDONDEO)
+    assert total["ventanas_real"][1:] == [None, None]
+    # el total y las submarcas siguen sumando
+    submarcas = [s for s in viejo["series"] if s["nivel"] == "submarca"]
+    for campo, cerradas in (("real_horizonte", 8), ("ventanas_real", 1)):
+        suma = np.sum([s[campo][:cerradas] for s in submarcas], axis=0)
+        np.testing.assert_allclose(total[campo][:cerradas], suma, atol=REDONDEO * (len(submarcas) + 1))
+
+
+def test_las_semanas_pasadas_traen_el_pronostico_vigente(tablas, publicacion):
+    """En el origen nuevo, las 8 semanas desde el origen viejo traen lo que ese origen había pronosticado, en el factor
+    del archivo nuevo; las anteriores no tuvieron pronóstico."""
+    viejo, nuevo = (publicacion[1][tablas[o]] for o in ("viejo", "nuevo"))
+    assert all(v is None for s in viejo["series"] for v in s["pronostico_anterior"])
+    predicciones = _del_origen(tablas["predicciones"], viejo)
+    semanal = predicciones[predicciones["granularidad"] == "semana"].groupby("fecha_inicio")["pronostico"].sum()
+    total = nuevo["series"][0]
+    assert total["pronostico_anterior"][:-8] == [None] * (SEMANAS_REALES - 8)
+    semanas = pd.to_datetime(nuevo["semanas"]["real"][-8:])
+    np.testing.assert_allclose(total["pronostico_anterior"][-8:], semanal.loc[semanas] * _factor(tablas, nuevo),
+                               atol=REDONDEO)
+
+
+def test_el_pronostico_vigente_es_el_del_origen_mas_reciente_que_cubre_cada_semana():
+    def corrida(origen: str, semanas: int) -> pd.DataFrame:
+        inicio = pd.Timestamp(origen) + pd.Timedelta(weeks=1)
+        return pd.DataFrame({"origen": pd.Timestamp(origen), "granularidad": "semana", "pronostico": 1.0,
+                             "fecha_inicio": pd.date_range(inicio, periods=semanas, freq="7D")})
+
+    vigente = pronostico_vigente(pd.concat([corrida("2026-10-12", 13), corrida("2026-11-09", 13)]))
+    por_semana = vigente.set_index("fecha_inicio")["origen"].dt.date.astype(str)
+    assert por_semana[:"2026-11-09"].unique().tolist() == ["2026-10-12"]  # 4 semanas del 12-oct
+    assert por_semana["2026-11-16":].unique().tolist() == ["2026-11-09"]  # desde ahí, el más reciente
+    assert len(por_semana) == 4 + 13
+
+
+def test_regenerar_un_origen_viejo_con_datos_posteriores_solo_agrega_su_venta_real(sinteticos, tablas, publicacion):
     """Lo que había al exportar el origen viejo: la venta hasta su semana, su train y su predicción. Después llegan
-    semanas de venta, un train y la predicción de un origen nuevo, y su archivo sale igual salvo `generado`."""
+    semanas de venta, un train y la predicción de un origen nuevo: su archivo sale igual, salvo `generado`, `real_hasta`
+    y la venta real de lo que cerró de su horizonte."""
     origen = sinteticos["ultima_semana"] - ANTES
     metricas, predicciones, panel = tablas["metricas"], tablas["predicciones"], tablas["panel"]
+    venta_diaria = tablas["venta_diaria"]
     assert panel["semana"].max() > origen
-    _, entonces = construir_publicacion(
-        metricas[metricas["run_id"] == "train-viejo"],
-        predicciones[predicciones["origen"] == origen],
-        panel[panel["semana"] <= origen],
-        {3: tablas["runs"][3]},
+    _, entonces = _publicar(
+        tablas,
         GENERADO - ANTES,
+        metricas=metricas[metricas["run_id"] == "train-viejo"],
+        predicciones=predicciones[predicciones["origen"] == origen],
+        panel=panel[panel["semana"] <= origen],
+        venta_diaria=venta_diaria[venta_diaria["fecha"] <= origen + pd.Timedelta(days=6)],
+        runs={3: tablas["runs"][3]},
     )
     _, ahora = publicacion
     assert list(entonces) == [tablas["viejo"]] and len(ahora) == 2
     antes, despues = entonces[tablas["viejo"]], ahora[tablas["viejo"]]
-    assert antes["generado"] != despues["generado"]
-    assert {**antes, "generado": None} == {**despues, "generado": None}
+    assert all(v is None for s in antes["series"] for c in VENTA_DEL_HORIZONTE for v in s[c])
+
+    def sin_lo_posterior(resultados: dict) -> dict:
+        series = [{k: v for k, v in s.items() if k not in VENTA_DEL_HORIZONTE} for s in resultados["series"]]
+        return {k: v for k, v in resultados.items() if k not in DESPUES_DEL_ORIGEN} | {"series": series}
+
+    assert sin_lo_posterior(antes) == sin_lo_posterior(despues)
 
 
 def test_solo_la_ultima_corrida_de_cada_origen(sinteticos, tablas, publicacion):
     repetida = _prediccion(sinteticos, sinteticos["ultima_semana"], PREDICCION + pd.Timedelta(hours=1), 4, escala=2.0)
-    todas = pd.concat([tablas["predicciones"], repetida], ignore_index=True)
-    _, archivos = construir_publicacion(tablas["metricas"], todas, tablas["panel"], tablas["runs"], GENERADO)
-    _, sola = construir_publicacion(tablas["metricas"], repetida, tablas["panel"], tablas["runs"], GENERADO)
+    _, archivos = _publicar(tablas, predicciones=pd.concat([tablas["predicciones"], repetida], ignore_index=True))
+    del_viejo = _del_origen(tablas["predicciones"], publicacion[1][tablas["viejo"]])
+    _, sola = _publicar(tablas, predicciones=pd.concat([del_viejo, repetida], ignore_index=True))
     assert archivos[tablas["nuevo"]] == sola[tablas["nuevo"]]
     assert archivos[tablas["nuevo"]]["corrida"]["fecha_prediccion"] == "2026-05-20T09:30:00"
     # la corrida nueva de otro origen no cambia el viejo
@@ -186,14 +266,13 @@ def test_solo_la_ultima_corrida_de_cada_origen(sinteticos, tablas, publicacion):
 
 
 def test_sin_el_train_de_su_version_no_se_exporta(tablas):
-    runs = {**tablas["runs"], 3: "un-run-que-no-esta"}
     with pytest.raises(ValueError, match="registró la versión 3"):
-        construir_publicacion(tablas["metricas"], tablas["predicciones"], tablas["panel"], runs, GENERADO)
+        _publicar(tablas, runs={**tablas["runs"], 3: "un-run-que-no-esta"})
 
 
 def test_venta_y_pronostico_como_indice(tablas, resultados):
     real, predicciones = _venta_real(tablas, resultados), _del_origen(tablas["predicciones"], resultados)
-    factor = 100 / (real["venta"].sum() / SEMANAS_REALES)
+    factor = _factor(tablas, resultados)
     total = resultados["series"][0]
     assert np.mean(total["real"]) == pytest.approx(100, abs=REDONDEO)
     # el mismo factor para cada serie, en la venta real, el pronóstico y las ventanas
@@ -225,10 +304,7 @@ def test_el_total_es_la_suma_de_las_submarcas(resultados):
 
 def test_las_series_de_mas_venta(tablas, resultados):
     venta = _venta_real(tablas, resultados).groupby("serie")["venta"].sum().sort_values(ascending=False)
-    _, archivos = construir_publicacion(
-        tablas["metricas"], tablas["predicciones"], tablas["panel"], tablas["runs"], GENERADO, top=2
-    )
-    pocas = archivos[tablas["nuevo"]]
+    pocas = _publicar(tablas, top=2)[1][tablas["nuevo"]]
     assert [s["nombre"] for s in pocas["series"] if s["nivel"] == "serie"] == venta.index[:2].tolist()
     # con el tope de 20 entran todas las que tienen pronóstico, y no la que dejó de vender
     todas = [s["nombre"] for s in resultados["series"] if s["nivel"] == "serie"]
@@ -249,10 +325,17 @@ CAMBIOS = {
     "falta un campo": (lambda r: r.pop("champion"), "champion"),
     "tipo equivocado": (lambda r: r["champion"].update(version="4"), "champion/version"),
     "fecha que no existe": (lambda r: r["corrida"].update(datos_hasta="2026-02-30"), "corrida/datos_hasta"),
-    "serie con otro largo": (lambda r: r["series"][1]["real"].pop(), "semanas reales"),
+    "serie con otro largo": (lambda r: r["series"][1]["real"].pop(), "semanas en real"),
     "número no finito": (lambda r: r["series"][0]["pronostico"].__setitem__(0, float("nan")), "no es un número válido"),
     "dos totales": (lambda r: r["series"].append(copy.deepcopy(r["series"][0])), "una sola serie total"),
     "venta en piezas": (lambda r: r["series"][0].update(real=[v * 50 for v in r["series"][0]["real"]]), "como índice"),
+    "venta real de una semana que no cerró": (lambda r: r["series"][0]["real_horizonte"].__setitem__(12, 1.0),
+                                              "real_horizonte justo en lo que cerró"),
+    "falta la venta real de una ventana cerrada": (lambda r: r["series"][0]["ventanas_real"].__setitem__(0, None),
+                                                   "ventanas_real justo en lo que cerró"),
+    "pronóstico anterior en otras semanas": (lambda r: r["series"][1]["pronostico_anterior"].__setitem__(0, 1.0),
+                                             "pronostico_anterior en otras semanas"),
+    "real_hasta antes del origen": (lambda r: r.update(real_hasta="2020-01-05"), "real_hasta es anterior"),
 }
 
 

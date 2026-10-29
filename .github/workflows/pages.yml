@@ -1,9 +1,13 @@
 # Pages: publica en GitHub Pages los datos de la página (manifest.json y un results.json por origen) que deja la tarea
 # export en el Volume de prod. La página está en tesis-mlops-web y los lee de adcamachoa.github.io/tesis-mlops/datos/.
 #
-# - Corre cuando el CD termina bien después de lanzarlo a mano sobre main, y a mano desde main. Los merges solo
-#   despliegan y no cambian los datos, así que no publican. workflow_run no trae la acción elegida en el CD: uno lanzado
-#   a mano que solo despliega también publica, con los mismos datos.
+# - Corre cuando el CD termina bien después de lanzarlo a mano sobre main, los lunes a las 11:00 de Bogotá (dos horas
+#   después de la corrida programada del job, que GitHub no ve) y a mano desde main. Los merges solo despliegan y no
+#   cambian los datos, así que no publican. workflow_run no trae la acción elegida en el CD: uno lanzado a mano que solo
+#   despliega también publica, con los mismos datos. Si el job del lunes no terminó o se detuvo, el schedule vuelve a
+#   publicar lo anterior.
+# - En un repo público, GitHub desactiva el schedule después de 60 días sin actividad en el repo: hace falta algún
+#   commit antes de que pasen (avisa por correo antes de desactivarlo).
 # - Lee siempre el schema tesis, nunca el de dev.
 # - Valida el manifest y los results.json con common.results_schema, con las reglas de la página, y que no sobre ningún
 #   archivo. Si algo falla, no publica y lo que ya estaba en Pages queda igual.
@@ -23,6 +27,8 @@ on:
     workflows: [CD]
     types: [completed]
     branches: [main]
+  schedule:
+    - cron: "0 16 * * 1"  # lunes 16:00 UTC = 11:00 en Bogotá, siempre sobre main
   workflow_dispatch:
 
 permissions:
@@ -39,7 +45,8 @@ defaults:
 
 jobs:
   descargar:
-    # con workflow_run, solo un CD que terminó bien, lanzado a mano sobre main y desde este repo; a mano, solo desde main
+    # con workflow_run, solo un CD que terminó bien, lanzado a mano sobre main y desde este repo; a mano, solo desde
+    # main; el schedule siempre corre sobre main
     if: >-
       (github.event_name == 'workflow_run'
       && github.event.workflow_run.conclusion == 'success'
@@ -47,6 +54,7 @@ jobs:
       && github.event.workflow_run.head_branch == 'main'
       && github.event.workflow_run.head_repository.full_name == github.repository)
       || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+      || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

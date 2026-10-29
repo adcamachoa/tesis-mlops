@@ -1,5 +1,6 @@
-"""Pruebas de databricks.yml: el job encadena las siete tareas sobre el schema de cada target, y el bundle no declara
-nada más que el job, para que deploy y destroy nunca toquen tablas, volúmenes ni el modelo."""
+"""Pruebas de databricks.yml: el job semanal corre sus tareas sobre el schema de cada target y reentrena solo si la
+condición toca_reentrenar lo pide; export junta las dos ramas. La programación solo corre en prod, y el bundle no
+declara nada más que el job, para que deploy y destroy nunca toquen tablas, volúmenes ni el modelo."""
 from pathlib import Path
 
 import pytest
@@ -10,12 +11,27 @@ TAREAS = {
     "ingest": "src/ingest.py",
     "features": "src/features.py",
     "monitoreo_datos": "src/monitoreo_datos.py",
+    "monitoreo_desempeno": "src/monitoreo_desempeno.py",
+    "toca_reentrenar": None,  # condition_task
     "train": "src/train.py",
     "predict": "src/predict.py",
     "export": "src/export_results.py",
-    "monitoreo_desempeno": "src/monitoreo_desempeno.py",
 }
-ACEPTAR = ["--aceptar-drift", "{{job.parameters.aceptar_drift}}"]  # solo en monitoreo_datos
+DEPENDENCIAS = {
+    "features": [{"task_key": "ingest"}],
+    "monitoreo_datos": [{"task_key": "features"}],
+    "monitoreo_desempeno": [{"task_key": "monitoreo_datos"}],
+    "toca_reentrenar": [{"task_key": "monitoreo_desempeno"}],
+    "train": [{"task_key": "toca_reentrenar", "outcome": "true"}],
+    "predict": [{"task_key": "train"}],
+    # las dos ramas: predict si reentrena y la rama false si no
+    "export": [{"task_key": "predict"}, {"task_key": "toca_reentrenar", "outcome": "false"}],
+}
+PARAMETROS_EXTRA = {  # además del schema
+    "ingest": ["--reentrenar", "{{job.parameters.reentrenar}}"],
+    "monitoreo_datos": ["--aceptar-drift", "{{job.parameters.aceptar_drift}}"],
+    "monitoreo_desempeno": ["--reentrenar", "{{job.parameters.reentrenar}}"],
+}
 
 
 @pytest.fixture(scope="module")
@@ -28,6 +44,11 @@ def job(bundle) -> dict:
     return bundle["resources"]["jobs"]["demanda_pipeline"]
 
 
+@pytest.fixture(scope="module")
+def tareas(job) -> dict[str, dict]:
+    return {t["task_key"]: t for t in job["tasks"]}
+
+
 def test_solo_declara_el_job(bundle):
     assert list(bundle["resources"]) == ["jobs"]
     assert list(bundle["resources"]["jobs"]) == ["demanda_pipeline"]
@@ -35,30 +56,47 @@ def test_solo_declara_el_job(bundle):
         assert "resources" not in target
 
 
-def test_las_tareas_van_encadenadas(job):
-    tareas = job["tasks"]
-    assert [t["task_key"] for t in tareas] == list(TAREAS)
-    assert "depends_on" not in tareas[0]
-    for anterior, tarea in zip(tareas, tareas[1:], strict=False):
-        assert tarea["depends_on"] == [{"task_key": anterior["task_key"]}]
+def test_las_tareas_y_sus_dependencias(job, tareas):
+    assert [t["task_key"] for t in job["tasks"]] == list(TAREAS)
+    assert "depends_on" not in tareas["ingest"]
+    assert {k: t["depends_on"] for k, t in tareas.items() if "depends_on" in t} == DEPENDENCIAS
+    # Databricks exige que toda dependencia de la condición diga su rama
+    for tarea in job["tasks"]:
+        for dependencia in tarea.get("depends_on", []):
+            assert (dependencia["task_key"] == "toca_reentrenar") == ("outcome" in dependencia)
+    # export corre si ninguna falló y alguna corrió: en las dos ramas, y no si train o predict fallan. Con
+    # AT_LEAST_ONE_SUCCESS exportaría aunque predict falle, porque la rama excluida cuenta como éxito
+    assert {k: t["run_if"] for k, t in tareas.items() if "run_if" in t} == {"export": "NONE_FAILED"}
+
+
+def test_reentrena_solo_si_la_condicion_lo_pide(tareas):
+    assert tareas["toca_reentrenar"]["condition_task"] == {
+        "op": "EQUAL_TO",
+        "left": "{{tasks.monitoreo_desempeno.values.reentrenar}}",
+        "right": "true",
+    }
+    orden = list(TAREAS)
+    # el desempeño se mide antes de la condición, así que una ventana que cierra esta semana puede adelantar el
+    # reentrenamiento; el drift de datos se revisa antes, y un extremo detiene el job sin llegar a la condición
+    assert orden.index("monitoreo_datos") < orden.index("monitoreo_desempeno") < orden.index("toca_reentrenar")
 
 
 def test_cada_tarea_corre_su_script_sobre_el_schema_del_target(job):
     entornos = {e["environment_key"] for e in job["environments"]}
     for tarea in job["tasks"]:
-        script = tarea["spark_python_task"]["python_file"]
-        assert script == TAREAS[tarea["task_key"]] and (RAIZ / script).is_file()
-        extra = ACEPTAR if tarea["task_key"] == "monitoreo_datos" else []
+        script = TAREAS[tarea["task_key"]]
+        if script is None:
+            assert "spark_python_task" not in tarea and "environment_key" not in tarea
+            continue
+        assert tarea["spark_python_task"]["python_file"] == script and (RAIZ / script).is_file()
+        extra = PARAMETROS_EXTRA.get(tarea["task_key"], [])
         assert tarea["spark_python_task"]["parameters"] == ["--schema", "${var.schema}", *extra]
         assert tarea["environment_key"] in entornos
 
 
-def test_el_drift_se_revisa_antes_de_entrenar_y_nadie_lo_deja_aceptado(job):
-    orden = [t["task_key"] for t in job["tasks"]]
-    assert orden.index("monitoreo_datos") < orden.index("train") < orden.index("predict")
-    assert orden[-1] == "monitoreo_desempeno"
-    # el parámetro existe para liberar un origen a mano; en la configuración siempre va vacío
-    assert job["parameters"] == [{"name": "aceptar_drift", "default": ""}]
+def test_los_parametros_van_vacios_en_cada_corrida_normal(job):
+    # existen para liberar un origen o forzar un reentrenamiento a mano; en la configuración siempre van vacíos
+    assert job["parameters"] == [{"name": "aceptar_drift", "default": ""}, {"name": "reentrenar", "default": ""}]
 
 
 def test_cada_target_fija_su_schema(bundle):
@@ -67,11 +105,16 @@ def test_cada_target_fija_su_schema(bundle):
     assert targets["dev"]["mode"] == "development" and targets["dev"]["default"] is True
     assert targets["dev"]["variables"] == {"schema": "tesis_dev"}
     assert targets["prod"]["mode"] == "production"
-    assert targets["prod"]["variables"] == {"schema": "tesis"}
+    assert targets["prod"]["variables"] == {"schema": "tesis", "programacion": "UNPAUSED"}
 
 
-def test_programacion_en_pausa_y_una_corrida_a_la_vez(job):
-    assert job["schedule"]["pause_status"] == "PAUSED"
+def test_programacion_semanal_solo_en_prod_y_una_corrida_a_la_vez(bundle, job):
+    assert job["schedule"] == {
+        "quartz_cron_expression": "0 0 9 ? * MON",
+        "timezone_id": "America/Bogota",
+        "pause_status": "${var.programacion}",
+    }
+    assert bundle["variables"]["programacion"]["default"] == "PAUSED"  # dev no la cambia
     assert job["max_concurrent_runs"] == 1
 
 

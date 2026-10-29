@@ -1,21 +1,24 @@
-"""Export: arma los datos de la página con las tablas metricas_modelos, predicciones y panel_semanal.
+"""Export: arma los datos de la página con las tablas metricas_modelos, predicciones, panel_semanal y la venta diaria.
 
-Se corre en Databricks como spark_python_task:
+Se corre en Databricks como spark_python_task, al final de cada corrida semanal:
     python src/export_results.py --schema tesis_dev
 
 Arma un results.json por cada origen de predicciones, con la última corrida de ese origen (si predict corrió varias
 veces con un origen, solo la última, sin mezclar), y manifest.json con la lista, en el formato 1 de tesis-mlops-web. En
 cada corrida vuelve a generar todos los orígenes desde las tablas.
 
-Cada origen se arma solo con lo que se sabía hasta su datos_hasta: la venta real de las 52 semanas hasta el origen y las
-métricas de la corrida de train que registró la versión que pronosticó, nunca las de un train posterior. La versión se
-liga con su train por su run en Unity Catalog, que es el run_id_modelo de su modelo en metricas_modelos; por eso no se
-borran versiones del modelo. Para el total, cada submarca y las 20 series de más venta deja la venta real de las 52
-semanas y el pronóstico de las 13 semanas y de las 3 ventanas.
+El pronóstico de cada origen se arma solo con lo que se sabía hasta su datos_hasta: la venta real de las 52 semanas
+hasta el origen, las métricas de la corrida de train que registró la versión que pronosticó (nunca las de un train
+posterior) y, en esas 52 semanas, el pronóstico que estaba vigente: el de la última corrida del origen anterior más
+reciente que la cubría. La versión se liga con su train por su run en Unity Catalog, que es el run_id_modelo de su
+modelo en metricas_modelos; por eso no se borran versiones del modelo. Después del origen solo entra la evaluación: la
+venta real de las semanas y de las ventanas pronosticadas que ya cerraron hasta real_hasta, el último domingo con datos.
+En las semanas sin reentrenamiento, el pronóstico publicado no cambia: solo se agregan esas semanas reales.
 
-La página es pública, así que la venta y el pronóstico van como índice: 100 es la venta semanal promedio del total en
-esas 52 semanas, y el mismo factor se aplica a todas las series y al MAE y el RMSE. La tabla predicciones sigue en
-piezas.
+Para el total, cada submarca y las 20 series de más venta deja la venta real de las 52 semanas, el pronóstico de las 13
+semanas y de las 3 ventanas, su venta real y el pronóstico vigente en las semanas pasadas. La página es pública, así
+que todo va como índice: 100 es la venta semanal promedio del total en las 52 semanas hasta el origen, y el mismo factor
+se aplica a todas las series, a todos los campos y al MAE y el RMSE. La tabla predicciones sigue en piezas.
 
 Todo se valida con common.results_schema antes de escribir en /Volumes/<catalogo>/<schema>/raw/output/:
 datos/<origen>/results.json, datos/manifest.json y results.json, que es el mismo archivo del origen más reciente. Si
@@ -31,10 +34,11 @@ from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 from pyspark.sql import DataFrame, SparkSession
 
-from common import results_schema
+from common import metrics, results_schema
 from common.backtest import CRITERIO
 from common.features import HORIZONTE
 from common.metrics import METRICAS, VENTANAS_DIAS
+from train import venta_diaria_serie
 
 SEMANAS_REALES = 52
 SERIES_TOP = 20
@@ -79,34 +83,60 @@ def _metrica(valor, factor: float = 1.0) -> float | None:
     return None if pd.isna(valor) else round(float(valor) * factor, DECIMALES_METRICA)
 
 
+def pronostico_vigente(anteriores: pd.DataFrame) -> pd.DataFrame:
+    """Las filas semanales del pronóstico que estaba vigente en cada semana: de las últimas corridas de `anteriores`,
+    las del origen más reciente cuyo horizonte cubre esa semana."""
+    semanal = anteriores[anteriores["granularidad"] == "semana"]
+    return semanal[semanal["origen"] == semanal.groupby("fecha_inicio")["origen"].transform("max")]
+
+
 def construir_resultados(
     entrenamiento: pd.DataFrame,
     corrida: pd.DataFrame,
+    anteriores: pd.DataFrame,
     panel: pd.DataFrame,
+    venta_diaria: pd.DataFrame,
     generado: pd.Timestamp,
     top: int = SERIES_TOP,
 ) -> dict:
     """El results.json de una corrida de predict (ver common.results_schema).
 
-    `corrida` son las filas de predicciones de un solo origen y una sola fecha_corrida, y `entrenamiento` las de
-    metricas_modelos de la corrida de train que registró la versión que pronosticó (ver `entrenamiento_de`). `panel` es
-    la venta semanal de cada serie (serie, semana, submarca y venta) de panel_semanal: solo cuentan las 52 semanas hasta
-    el origen. El total y las submarcas suman la venta real de todas las series, también las que no se pronostican, como
-    en la métrica del backtest.
+    `corrida` son las filas de predicciones de un solo origen y una sola fecha_corrida, `anteriores` las de las últimas
+    corridas de los orígenes anteriores, y `entrenamiento` las de metricas_modelos de la corrida de train que registró
+    la versión que pronosticó (ver `entrenamiento_de`). `panel` es la venta semanal de cada serie (serie, semana,
+    submarca y venta) de panel_semanal, y `venta_diaria` la de cada serie por día (serie, fecha y unidades). La venta
+    real llega hasta la última semana del panel, `real_hasta`: después del origen solo entran las semanas y las ventanas
+    que ya cerraron. El total y las submarcas suman la venta real de todas las series, también las que no se
+    pronostican, como en la métrica del backtest.
     """
     origen, champion = corrida["origen"].iloc[0], corrida["modelo"].iloc[0]
+    real_hasta = panel["semana"].max() + pd.Timedelta(days=6)
     semanas = pd.date_range(end=origen, periods=SEMANAS_REALES, freq="7D")
     real = panel[panel["semana"].isin(semanas)]
     factor = results_schema.BASE_INDICE * SEMANAS_REALES / real["venta"].sum()
     semanal = corrida[corrida["granularidad"] == "semana"]
     ventanas = corrida[corrida["granularidad"] == "ventana"]
+    semanas_pronostico = pd.DatetimeIndex(semanal.sort_values("periodo")["fecha_inicio"].unique())
+    vigente = pronostico_vigente(anteriores)
+    submarcas = panel.drop_duplicates("serie").set_index("serie")["submarca"]
+    real_ventanas = metrics.real_por_ventana(venta_diaria, origen).reset_index()
+    real_ventanas["submarca"] = real_ventanas["serie"].map(submarcas)
+    # qué valores ya se conocen: las semanas y ventanas cerradas hasta real_hasta, y las semanas que un pronóstico
+    # anterior cubría
+    cerradas = semanas_pronostico + pd.Timedelta(days=6) <= real_hasta
+    ventanas_cerradas = [hasta <= real_hasta for _, hasta in metrics.fechas_ventanas(origen)]
+    cubiertas = semanas.isin(vigente["fecha_inicio"])
 
     def serie(nivel: str, nombre: str, columna: str | None = None) -> dict:
         """El total (sin `columna`) o las filas donde `columna` vale `nombre`, como índice."""
 
-        def suma(df: pd.DataFrame, valor: str, por: str, claves) -> list[float]:
+        def suma(df: pd.DataFrame, valor: str, por: str, claves, conocidas=None) -> list[float | None]:
+            """Con `conocidas`, nulo donde el valor todavía no se conoce."""
             filas = df if columna is None else df[df[columna] == nombre]
-            return _indice(filas.groupby(por)[valor].sum().reindex(claves, fill_value=0), factor)
+            valores = _indice(filas.groupby(por)[valor].sum().reindex(claves, fill_value=0), factor)
+            if conocidas is None:
+                return valores
+            return [v if conocida else None for v, conocida in zip(valores, conocidas, strict=True)]
 
         return {
             "nivel": nivel,
@@ -114,6 +144,10 @@ def construir_resultados(
             "real": suma(real, "venta", "semana", semanas),
             "pronostico": suma(semanal, "pronostico", "periodo", range(1, HORIZONTE + 1)),
             "ventanas": suma(ventanas, "pronostico", "periodo", range(1, len(VENTANAS_DIAS) + 1)),
+            "real_horizonte": suma(panel, "venta", "semana", semanas_pronostico, cerradas),
+            "pronostico_anterior": suma(vigente, "pronostico", "fecha_inicio", semanas, cubiertas),
+            "ventanas_real": suma(real_ventanas, "real", "ventana", range(1, len(VENTANAS_DIAS) + 1),
+                                  ventanas_cerradas),
         }
 
     # las de más venta real en las 52 semanas, entre las que tienen pronóstico
@@ -124,6 +158,7 @@ def construir_resultados(
         "version_esquema": results_schema.VERSION,
         "generado": _fecha_hora(generado),
         "escala": results_schema.ESCALA,
+        "real_hasta": _fecha(real_hasta),
         "corrida": {
             "fecha_prediccion": _fecha_hora(corrida["fecha_corrida"].iloc[0]),
             "fecha_entrenamiento": _fecha_hora(primera["fecha_corrida"]),
@@ -145,10 +180,7 @@ def construir_resultados(
             }
             for _, fila in entrenamiento.iterrows()
         ],
-        "semanas": {
-            "real": [_fecha(s) for s in semanas],
-            "pronostico": [_fecha(s) for s in semanal.sort_values("periodo")["fecha_inicio"].unique()],
-        },
+        "semanas": {"real": [_fecha(s) for s in semanas], "pronostico": [_fecha(s) for s in semanas_pronostico]},
         "ventanas": [
             {"numero": int(v["periodo"]), "desde": _fecha(v["fecha_inicio"]), "hasta": _fecha(v["fecha_fin"]),
              "dias": (v["fecha_fin"] - v["fecha_inicio"]).days + 1}
@@ -166,21 +198,24 @@ def construir_publicacion(
     metricas: pd.DataFrame,
     predicciones: pd.DataFrame,
     panel: pd.DataFrame,
+    venta_diaria: pd.DataFrame,
     runs: dict[int, str],
     generado: pd.Timestamp,
     top: int = SERIES_TOP,
 ) -> tuple[dict, dict[str, dict]]:
     """manifest.json y los results.json por su ruta relativa al manifest: uno por origen de predicciones, con su última
-    corrida y las métricas del train de su versión.
+    corrida, las métricas del train de su versión y el pronóstico vigente de los orígenes anteriores.
 
-    `metricas` y `predicciones` son las tablas metricas_modelos y predicciones con todas sus corridas, y `runs` el run
-    en Unity Catalog de cada versión que pronosticó.
+    `metricas` y `predicciones` son las tablas metricas_modelos y predicciones con todas sus corridas, `panel` y
+    `venta_diaria` la venta semanal y diaria por serie, y `runs` el run en Unity Catalog de cada versión que pronosticó.
     """
+    ultimas = ultimas_corridas(predicciones)
     archivos, pronosticos = {}, []
-    for origen, corrida in ultimas_corridas(predicciones).groupby("origen"):
+    for origen, corrida in ultimas.groupby("origen"):
         version = int(corrida["modelo_version"].iloc[0])
         entrenamiento = entrenamiento_de(metricas, version, runs[version])
-        resultados = construir_resultados(entrenamiento, corrida, panel, generado, top)
+        anteriores = ultimas[ultimas["origen"] < origen]
+        resultados = construir_resultados(entrenamiento, corrida, anteriores, panel, venta_diaria, generado, top)
         ruta = f"{_fecha(origen)}/{RESULTS}"
         archivos[ruta] = resultados
         pronosticos.append(
@@ -243,7 +278,10 @@ def main():
     metricas = tabla("metricas_modelos").select(*columnas).toPandas()
     predicciones = tabla("predicciones").toPandas()
     panel = tabla("panel_semanal").select("serie", "semana", "submarca", "venta").toPandas()
-    for df, fechas in ((predicciones, ("origen", "fecha_inicio", "fecha_fin")), (panel, ("semana",))):
+    venta_diaria = venta_diaria_serie(tabla("ventas_bronze"), tabla("productos_bronze")).toPandas()
+    for df, fechas in (
+        (predicciones, ("origen", "fecha_inicio", "fecha_fin")), (panel, ("semana",)), (venta_diaria, ("fecha",))
+    ):
         for columna in fechas:
             df[columna] = pd.to_datetime(df[columna])
 
@@ -251,17 +289,21 @@ def main():
     cliente, modelo_uc = MlflowClient(), f"{args.catalogo}.{args.schema}.demanda_forecast"
     versiones = ultimas_corridas(predicciones)["modelo_version"].unique()
     runs = {int(v): run_de_version(cliente, modelo_uc, int(v)) for v in versiones}
-    manifest, archivos = construir_publicacion(metricas, predicciones, panel, runs, pd.Timestamp.now().floor("s"))
+    manifest, archivos = construir_publicacion(
+        metricas, predicciones, panel, venta_diaria, runs, pd.Timestamp.now().floor("s")
+    )
     salida = Path(f"/Volumes/{args.catalogo}/{args.schema}/raw/output")
     escribir(manifest, archivos, salida)
-    print(f"{salida / DATOS}: {results_schema.MANIFEST} con {len(archivos)} pronóstico(s); {salida / RESULTS} es el "
-          f"del origen más reciente")
+    real_hasta = next(iter(archivos.values()))["real_hasta"]
+    print(f"{salida / DATOS}: {results_schema.MANIFEST} con {len(archivos)} pronóstico(s), venta real hasta el "
+          f"{real_hasta}; {salida / RESULTS} es el del origen más reciente")
     for entrada in manifest["pronosticos"]:
         resultados = archivos[entrada["ruta"]]
         champion, corrida = resultados["champion"], resultados["corrida"]
+        semanas = sum(v is not None for v in resultados["series"][0]["real_horizonte"])
         print(f"  origen {corrida['origen']}: {champion['modelo']} versión {champion['version']}, predicción del "
               f"{corrida['fecha_prediccion']}, entrenamiento del {corrida['fecha_entrenamiento']}, "
-              f"{len(resultados['series'])} series")
+              f"{len(resultados['series'])} series, {semanas} de {HORIZONTE} semanas con venta real")
 
 
 if __name__ == "__main__":

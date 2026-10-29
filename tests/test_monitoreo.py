@@ -243,20 +243,31 @@ RANGO = {"wape_m1_min": 0.2, "wape_m1_max": 0.4, "wape_m2_min": 0.2, "wape_m2_ma
          "wape_total_max": 0.4, "sesgo_total_min": -0.05, "sesgo_total_max": 0.10}
 
 
-def test_alerta_si_el_wape_pasa_el_maximo_o_el_sesgo_sale_del_rango():
+def _medir(real, pronostico) -> dict[str, dict]:
+    return {m: monitoreo.evaluar(_ventanas(real, pronostico), RANGO, m) for m in monitoreo.MEDICIONES}
+
+
+def test_cada_medicion_alerta_solo_con_sus_metricas():
     real = [100, 100, 100, 50, 50, 50]
-    en_rango = monitoreo.evaluar(_ventanas(real, [130, 70, 100, 50, 65, 40]), RANGO)
-    assert en_rango["fuera_de_rango"] == "" and not en_rango["alerta"]
-    assert not {"mae", "rmse"} & set(en_rango)  # van en piezas
+    en_rango = _medir(real, [130, 70, 100, 50, 65, 40])
+    assert all(m["fuera_de_rango"] == "" and not m["alerta"] for m in en_rango.values())
+    assert not {"mae", "rmse"} & set(en_rango["total"])  # van en piezas
+    # cada medición trae solo sus métricas: las de las ventanas que todavía no cierran quedan nulas
+    mes_1 = en_rango["mes_1"]
+    assert mes_1["wape_m1"] == pytest.approx(0.2) and mes_1["medicion"] == "mes_1"
+    assert np.isnan(mes_1["wape_m2"]) and np.isnan(mes_1["wape_total"]) and np.isnan(mes_1["sesgo_total"])
+    assert en_rango["mes_2"]["wape_m2"] == pytest.approx(0.3) and np.isnan(en_rango["mes_2"]["wape_m1"])
     # un WAPE mejor que el mejor origen del backtest no es alerta
-    perfecto = monitoreo.evaluar(_ventanas(real, real), RANGO)
-    assert perfecto["wape_total"] == 0 and not perfecto["alerta"]
-    # el sesgo se sale por abajo: pronosticó 20 % de menos en todo
-    corto = monitoreo.evaluar(_ventanas(real, [v * 0.8 for v in real]), RANGO)
-    assert corto["fuera_de_rango"] == "sesgo_total" and corto["alerta"]
-    # el mes 1 muy errado
-    errado = monitoreo.evaluar(_ventanas(real, [200, 100, 100, 0, 50, 50]), RANGO)
-    assert "wape_m1" in errado["fuera_de_rango"].split(",")
+    perfecto = _medir(real, real)
+    assert perfecto["total"]["wape_total"] == 0 and not any(m["alerta"] for m in perfecto.values())
+    # pronosticó 20 % de menos en todo: el sesgo de cada mes va como dato y solo el total se sale del rango
+    corto = _medir(real, [v * 0.8 for v in real])
+    assert corto["mes_1"]["sesgo_m1"] == pytest.approx(-0.2) and not corto["mes_1"]["alerta"]
+    assert corto["mes_2"]["sesgo_m2"] == pytest.approx(-0.2) and not corto["mes_2"]["alerta"]
+    assert corto["total"]["fuera_de_rango"] == "sesgo_total" and corto["total"]["alerta"]
+    # el mes 1 muy errado alerta apenas cierra, sin esperar al total
+    errado = _medir(real, [200, 100, 100, 0, 50, 50])
+    assert errado["mes_1"]["fuera_de_rango"] == "wape_m1" and errado["mes_1"]["alerta"]
 
 
 def test_rango_del_backtest():
@@ -267,44 +278,110 @@ def test_rango_del_backtest():
     assert rango["sesgo_total_min"] == -0.04 and rango["sesgo_total_max"] == 0.08
 
 
-def test_revision_manual_con_dos_origenes_seguidos_en_alerta():
-    medidas = pd.DataFrame({
-        "origen": pd.date_range("2026-01-05", periods=5, freq="28D"),
-        "fecha_corrida": pd.date_range("2026-01-12", periods=5, freq="28D"),
-        "alerta": [False, True, True, False, True],
+def _medidas(origenes, mediciones, alertas, corridas=None, cierres=None) -> pd.DataFrame:
+    origenes = pd.to_datetime(origenes)
+    return pd.DataFrame({
+        "origen": origenes,
+        "fecha_corrida": pd.to_datetime(corridas) if corridas is not None else origenes + pd.Timedelta(days=8),
+        "medicion": mediciones,
+        "cierre": pd.to_datetime(cierres) if cierres is not None else origenes + pd.Timedelta(days=37),
+        "alerta": alertas,
     })
+
+
+def test_revision_manual_con_la_misma_medicion_en_dos_origenes_seguidos():
+    origenes = pd.date_range("2026-01-05", periods=5, freq="28D")
+    medidas = _medidas(origenes, "mes_1", [False, True, True, False, True])
     assert monitoreo.estados(medidas).tolist() == ["en rango", "alerta", "revisión manual", "en rango", "alerta"]
 
 
+def test_dos_mediciones_del_mismo_pronostico_no_piden_revision():
+    # el mes 1 y el mes 2 de un pronóstico son del mismo modelo y el mismo origen: un solo pronóstico malo
+    medidas = _medidas(["2026-10-12", "2026-10-12", "2026-11-09"], ["mes_1", "mes_2", "mes_2"], [True, True, True])
+    assert monitoreo.estados(medidas).tolist() == ["alerta", "alerta", "revisión manual"]
+
+
 def test_de_cada_origen_cuenta_su_ultima_corrida():
-    medidas = pd.DataFrame({
-        "origen": pd.to_datetime(["2026-01-05", "2026-01-05", "2026-02-02"]),
-        "fecha_corrida": pd.to_datetime(["2026-01-06 10:00", "2026-01-06 12:00", "2026-02-03 10:00"]),
-        "alerta": [True, False, True],
-    })
+    medidas = _medidas(["2026-01-05", "2026-01-05", "2026-02-02"], "total", [True, False, True],
+                       corridas=["2026-01-06 10:00", "2026-01-06 12:00", "2026-02-03 10:00"])
     # la última corrida del 5-ene no tuvo alerta, así que la del 2-feb es solo alerta
     assert monitoreo.estados(medidas).tolist() == ["alerta", "en rango", "alerta"]
 
 
-def test_corridas_por_medir():
-    corridas = pd.DataFrame({
-        "fecha_corrida": pd.to_datetime(["2026-07-14", "2026-07-15", "2026-10-13"]),
-        "origen": pd.to_datetime(["2026-07-13", "2026-07-13", "2026-10-12"]),
-    })
-    medidas = corridas.iloc[:1]
-    cerradas, abiertas = monitoreo.por_medir(corridas, medidas, pd.Timestamp("2026-10-12"))
-    assert cerradas["fecha_corrida"].tolist() == [pd.Timestamp("2026-07-15")]  # la primera ya se midió
-    assert abiertas["origen"].tolist() == [pd.Timestamp("2026-10-12")]
-    assert monitoreo.ventanas_cerradas(pd.Timestamp("2026-07-13"), pd.Timestamp("2026-10-12"))
-    assert not monitoreo.ventanas_cerradas(pd.Timestamp("2026-07-20"), pd.Timestamp("2026-10-12"))
+def _medido_en(corridas: pd.DataFrame, real_hasta: str) -> set[tuple[str, str]]:
+    cerradas, _ = monitoreo.por_medir(corridas, _medidas([], [], []), pd.Timestamp(real_hasta))
+    return {(f"{o.date()}", m) for o, m in zip(cerradas["origen"], cerradas["medicion"], strict=True)}
+
+
+def test_cada_ventana_se_mide_en_la_corrida_siguiente_a_su_cierre():
+    """El calendario esperado: pronósticos cada 4 semanas desde el 12-oct, y hacia el 18-ene, 6 mediciones."""
+    origenes = pd.to_datetime(["2026-10-12", "2026-11-09", "2026-12-07", "2027-01-04"])
+    corridas = pd.DataFrame({"fecha_corrida": origenes + pd.Timedelta(days=8), "origen": origenes})
+    # la corrida del lunes mide con la venta hasta el domingo anterior
+    assert _medido_en(corridas, "2026-11-15") == set()
+    assert _medido_en(corridas, "2026-11-22") == {("2026-10-12", "mes_1")}  # corrida del 23-nov
+    assert _medido_en(corridas, "2026-12-20") == {  # corrida del 21-dic
+        ("2026-10-12", "mes_1"), ("2026-10-12", "mes_2"), ("2026-11-09", "mes_1")}
+    assert _medido_en(corridas, "2027-01-17") == {  # corrida del 18-ene
+        ("2026-10-12", "mes_1"), ("2026-10-12", "mes_2"), ("2026-10-12", "total"),
+        ("2026-11-09", "mes_1"), ("2026-11-09", "mes_2"), ("2026-12-07", "mes_1")}
+
+
+def test_lo_ya_medido_no_se_vuelve_a_medir():
+    corridas = pd.DataFrame({"fecha_corrida": pd.to_datetime(["2026-10-28 16:28", "2026-10-28 17:47"]),
+                             "origen": pd.to_datetime(["2026-10-12", "2026-10-12"])})
+    medidas = _medidas(["2026-10-12"], ["mes_1"], [False], corridas=["2026-10-28 16:28"])
+    cerradas, abiertas = monitoreo.por_medir(corridas, medidas, pd.Timestamp("2026-12-20"))
+    assert sorted(zip(cerradas["fecha_corrida"].dt.hour, cerradas["medicion"], strict=True)) == [
+        (16, "mes_2"), (17, "mes_1"), (17, "mes_2")]
+    assert set(abiertas["medicion"]) == {"total"}
+    assert set(cerradas["cierre"].dt.date.astype(str)) == {"2026-11-18", "2026-12-18"}
+
+
+def test_reentrena_cada_4_semanas():
+    ultimo, vacio = pd.Timestamp("2026-10-12"), _medidas([], [], [])
+    decisiones = {f"{o.date()}": monitoreo.decidir_reentrenamiento(o, ultimo, vacio)[0]
+                  for o in pd.date_range("2026-10-19", "2026-11-09", freq="7D")}
+    assert decisiones == {"2026-10-19": False, "2026-10-26": False, "2026-11-02": False, "2026-11-09": True}
+    assert monitoreo.decidir_reentrenamiento(ultimo, None, vacio)[0]  # todavía no hay ningún pronóstico
+    assert monitoreo.decidir_reentrenamiento(ultimo, ultimo, vacio, forzado=True) == (True, "reentrenar=si")
+
+
+def test_una_alerta_nueva_adelanta_el_reentrenamiento_una_sola_vez():
+    # el mes 1 del 12-oct cerró el 18-nov con alerta, y el último pronóstico (9-nov) conocía hasta el 15-nov
+    alerta = _medidas(["2026-10-12"], ["mes_1"], [True], cierres=["2026-11-18"])
+    reentrena, motivo = monitoreo.decidir_reentrenamiento(
+        pd.Timestamp("2026-11-16"), pd.Timestamp("2026-11-09"), alerta)
+    assert reentrena and "mes_1 del origen 2026-10-12" in motivo
+    # la semana siguiente, el pronóstico del 16-nov ya conocía esa ventana: no vuelve a reentrenar por ella
+    assert not monitoreo.decidir_reentrenamiento(pd.Timestamp("2026-11-23"), pd.Timestamp("2026-11-16"), alerta)[0]
+    # sin alerta, la ventana nueva no adelanta nada
+    en_rango = alerta.assign(alerta=False)
+    assert not monitoreo.decidir_reentrenamiento(pd.Timestamp("2026-11-16"), pd.Timestamp("2026-11-09"), en_rango)[0]
+
+
+def test_la_alerta_de_una_corrida_reemplazada_no_cuenta():
+    medidas = _medidas(["2026-10-12", "2026-10-12"], "mes_1", [True, False],
+                       corridas=["2026-10-28 16:28", "2026-10-28 17:47"], cierres=["2026-11-18", "2026-11-18"])
+    assert not monitoreo.decidir_reentrenamiento(pd.Timestamp("2026-11-16"), pd.Timestamp("2026-11-09"), medidas)[0]
+
+
+def test_el_parametro_reentrenar():
+    assert monitoreo.leer_reentrenar("si") and not monitoreo.leer_reentrenar("")
+    with pytest.raises(ValueError, match="vacío o con 'si'"):
+        monitoreo.leer_reentrenar("true")
 
 
 def test_el_log_no_muestra_piezas(base):
     real = [12_345, 23_456, 34_567, 4_321, 5_432, 6_543]
-    medida = monitoreo.evaluar(_ventanas(real, [v * 1.3 for v in real]), RANGO) | {"origen": ULTIMO, "estado": "alerta"}
+    medidas = [
+        monitoreo.evaluar(_ventanas(real, [v * 1.3 for v in real]), RANGO, m)
+        | {"origen": ULTIMO, "cierre": ULTIMO + pd.Timedelta(days=37), "estado": "alerta"}
+        for m in monitoreo.MEDICIONES
+    ]
     revisiones = monitoreo.drift_datos(_con_origen(base, stock_cierre=lambda v: v * 0), ULTIMO)
     texto = " ".join([
-        monitoreo.describir_medida(medida),
+        *(monitoreo.describir_medida(m) for m in medidas),
         monitoreo.describir_rango(RANGO),
         *(monitoreo.describir(r) for r in revisiones.itertuples()),
     ])

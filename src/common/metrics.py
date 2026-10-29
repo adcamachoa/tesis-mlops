@@ -109,6 +109,20 @@ def pronostico_por_ventana(predicciones: pd.DataFrame, venta_total: pd.Series, o
     )
 
 
+def real_por_ventana(venta_diaria: pd.DataFrame, origen: pd.Timestamp) -> pd.Series:
+    """Venta real de cada serie en cada ventana del pronóstico de `origen`, indexada por serie y ventana. `venta_diaria`
+    trae serie, fecha y unidades; las series sin venta en una ventana no aparecen."""
+    lunes = origen + pd.Timedelta(weeks=1)
+    dias = venta_diaria[(venta_diaria["fecha"] >= lunes) & (venta_diaria["fecha"] < lunes + pd.Timedelta(days=91))]
+    return (
+        dias.assign(serie=dias["serie"].astype(str),
+                    ventana=_ventana_de_cada_dia()[(dias["fecha"] - lunes).dt.days.to_numpy()])
+        .groupby(["serie", "ventana"])["unidades"]
+        .sum()
+        .rename("real")
+    )
+
+
 def a_ventanas(predicciones: pd.DataFrame, venta_diaria: pd.DataFrame) -> pd.DataFrame:
     """Venta real y pronóstico por origen × serie × ventana.
 
@@ -116,21 +130,12 @@ def a_ventanas(predicciones: pd.DataFrame, venta_diaria: pd.DataFrame) -> pd.Dat
     serie que no está en las predicciones de un origen (nueva, o sin venta en las 52 semanas previas) cuenta con
     pronóstico 0, y una serie pronosticada sin venta en una ventana cuenta con venta 0.
     """
-    venta_diaria = venta_diaria.assign(serie=venta_diaria["serie"].astype(str))
     venta_total = venta_diaria.groupby("fecha")["unidades"].sum()
-    ventana_del_dia = _ventana_de_cada_dia()
     numeros = np.arange(1, len(VENTANAS_DIAS) + 1)
     partes = []
     for origen, pred in predicciones.groupby("origen"):
-        lunes = origen + pd.Timedelta(weeks=1)
         pronostico = pronostico_por_ventana(pred, venta_total, origen)
-        dias = venta_diaria[(venta_diaria["fecha"] >= lunes) & (venta_diaria["fecha"] < lunes + pd.Timedelta(days=91))]
-        real = (
-            dias.assign(ventana=ventana_del_dia[(dias["fecha"] - lunes).dt.days.to_numpy()])
-            .groupby(["serie", "ventana"])["unidades"]
-            .sum()
-            .rename("real")
-        )
+        real = real_por_ventana(venta_diaria, origen)
         series = sorted(set(pronostico.index.get_level_values("serie")) | set(real.index.get_level_values("serie")))
         celdas = pd.MultiIndex.from_product([series, numeros], names=["serie", "ventana"])
         juntas = pd.concat([real, pronostico], axis=1).reindex(celdas).fillna(0)

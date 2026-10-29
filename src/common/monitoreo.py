@@ -8,8 +8,10 @@ Funciones puras en pandas. Los umbrales están documentados en CLAUDE.md.
   del mes contra las semanas que ya revisó la corrida anterior (SKU con stock y venta entre salidas de stock) y que el
   stock llegue a la última semana con venta. Un nivel extremo detiene el job antes de entrenar, salvo que una persona
   lo acepte para ese origen.
-- Desempeño: mide cada pronóstico en vivo con el formato estándar cuando cierran sus tres ventanas, y compara el WAPE y
-  el sesgo con el mínimo y el máximo por origen del backtest de la versión que pronosticó.
+- Desempeño: mide cada ventana de cada pronóstico en vivo apenas cierra (el mes 1, el mes 2 y, al cerrar el mes 3, el
+  total), con el formato estándar, y la compara con el mínimo y el máximo por origen del backtest de la versión que
+  pronosticó. Con eso y el calendario decide si la corrida reentrena: cada 4 semanas, o antes si una alerta trae
+  información que el último pronóstico no conocía.
 
 Nada de esto lleva piezas: el PSI, la parte de nulos, las coberturas, el WAPE, el MAPE y el sesgo son proporciones.
 """
@@ -17,8 +19,8 @@ import numpy as np
 import pandas as pd
 
 from common.backtest import entrenamiento, prueba
-from common.features import HORIZONTE, ultima_semana_completa
-from common.metrics import formato_estandar
+from common.features import ultima_semana_completa
+from common.metrics import fechas_ventanas, formato_estandar, sesgo
 
 # historia de la serie, surtido y oferta; sin calendario (13 semanas siempre tienen otro calendario que el historial
 # completo) ni jerarquía (no cambia de un origen a otro)
@@ -43,11 +45,20 @@ COBERTURA_EXTREMO = 0.6
 SEMANAS_ATRASO = 1  # semanas que el stock puede atrasar el origen antes de detener el job
 COLUMNAS_DATOS = ["origen", "revision", "variable", "valor", "referencia", "umbral_aviso", "umbral_extremo", "nivel"]
 
-METRICAS_VIVO = (  # el formato estándar y el criterio del champion, sin MAE ni RMSE, que van en piezas
-    "wape_m1", "wape_m2", "wape_total", "mape_m1", "mape_m2", "mape_total", "sesgo_total", "wape_tipo_mes",
+METRICAS_VIVO = (  # el formato estándar, el sesgo de cada mes y el criterio del champion; sin MAE ni RMSE (en piezas)
+    "wape_m1", "wape_m2", "wape_total", "mape_m1", "mape_m2", "mape_total", "sesgo_m1", "sesgo_m2", "sesgo_total",
+    "wape_tipo_mes",
 )
 METRICAS_ALERTA = ("wape_m1", "wape_m2", "wape_total", "sesgo_total")
 SOLO_ARRIBA = ("wape_m1", "wape_m2", "wape_total")  # un WAPE más bajo que el del mejor origen es buena noticia
+# Cada medición se hace en la primera corrida después de que cierra su ventana. Alerta con sus métricas del formato
+# estándar, contra el rango del backtest; el resto va solo como dato, también el sesgo de cada mes (sin rango fijado).
+MEDICIONES = {
+    "mes_1": {"ventana": 1, "alerta": ("wape_m1",), "dato": ("mape_m1", "sesgo_m1")},
+    "mes_2": {"ventana": 2, "alerta": ("wape_m2",), "dato": ("mape_m2", "sesgo_m2")},
+    "total": {"ventana": 3, "alerta": ("wape_total", "sesgo_total"), "dato": ("mape_total", "wape_tipo_mes")},
+}
+SEMANAS_REENTRENAMIENTO = 4  # un pronóstico cada 4 semanas, o antes con una alerta nueva
 
 
 class DriftExtremo(RuntimeError):
@@ -301,21 +312,24 @@ def revisar_detencion(revisiones: pd.DataFrame, origen: pd.Timestamp, aceptado: 
     )
 
 
-def ventanas_cerradas(origen: pd.Timestamp, ultimo_origen: pd.Timestamp) -> bool:
-    """Si ya se conoce la venta de las tres ventanas del pronóstico de `origen`: la ventana 3 termina el domingo de la
-    semana origen + 13, y `ultimo_origen` es el lunes de la última semana completa."""
-    return origen + pd.Timedelta(weeks=HORIZONTE) <= ultimo_origen
+def cierre(origen: pd.Timestamp, medicion: str) -> pd.Timestamp:
+    """El último día de la ventana que permite hacer `medicion` sobre el pronóstico de `origen`."""
+    return fechas_ventanas(origen)[MEDICIONES[medicion]["ventana"] - 1][1]
 
 
 def por_medir(
-    corridas: pd.DataFrame, medidas: pd.DataFrame, ultimo_origen: pd.Timestamp
+    corridas: pd.DataFrame, medidas: pd.DataFrame, real_hasta: pd.Timestamp
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Las corridas de predicciones (una fila por fecha_corrida y origen) que todavía no están en `medidas`, separadas
-    en las que ya cerraron sus tres ventanas y las que no."""
-    ya = set(zip(medidas["fecha_corrida"], medidas["origen"], strict=True))
-    nuevas = corridas[[c not in ya for c in zip(corridas["fecha_corrida"], corridas["origen"], strict=True)]]
-    cerradas = nuevas["origen"].map(lambda o: ventanas_cerradas(o, ultimo_origen)).astype(bool)
-    return nuevas[cerradas], nuevas[~cerradas]
+    """Las mediciones de cada corrida de predicciones (`corridas`, una fila por fecha_corrida y origen) que todavía no
+    están en `medidas`, con su `medicion` y su `cierre`, separadas en las que ya cerraron (`cierre` a lo más
+    `real_hasta`, el último domingo con venta) y las que no."""
+    filas = corridas.merge(pd.DataFrame({"medicion": list(MEDICIONES)}), how="cross")
+    filas["cierre"] = [cierre(o, m) for o, m in zip(filas["origen"], filas["medicion"], strict=True)]
+    claves = ["fecha_corrida", "origen", "medicion"]
+    ya = set(medidas[claves].itertuples(index=False, name=None))
+    nuevas = filas[[c not in ya for c in filas[claves].itertuples(index=False, name=None)]]
+    cerradas = nuevas["cierre"] <= real_hasta
+    return nuevas[cerradas].reset_index(drop=True), nuevas[~cerradas].reset_index(drop=True)
 
 
 def rango_backtest(por_origen: pd.DataFrame) -> dict[str, float]:
@@ -324,32 +338,83 @@ def rango_backtest(por_origen: pd.DataFrame) -> dict[str, float]:
     return {f"{m}_{f}": float(por_origen[m].agg(f)) for m in METRICAS_ALERTA for f in ("min", "max")}
 
 
-def evaluar(ventanas: pd.DataFrame, rango: dict[str, float]) -> dict:
-    """Métricas en vivo de un pronóstico (`metrics.a_ventanas` de un solo origen) y si se salen del rango.
+def evaluar(ventanas: pd.DataFrame, rango: dict[str, float], medicion: str) -> dict:
+    """Las métricas de `medicion` en un pronóstico (`metrics.a_ventanas` de un solo origen) y si se salen del rango.
 
-    Un WAPE solo se sale por arriba del máximo; el sesgo, por arriba del máximo o por abajo del mínimo.
+    Solo cuentan las ventanas que ya cerraron: las de las otras mediciones quedan nulas. Un WAPE solo se sale por arriba
+    del máximo; el sesgo total, por arriba del máximo o por abajo del mínimo.
     """
-    estandar = formato_estandar(ventanas)
-    metricas = {m: estandar[m] for m in METRICAS_VIVO}
+    calculadas = formato_estandar(ventanas) | {
+        f"sesgo_m{k}": sesgo(v["real"], v["pronostico"]) for k, v in ventanas.groupby("ventana") if k < 3
+    }
+    propias = MEDICIONES[medicion]["alerta"] + MEDICIONES[medicion]["dato"]
+    metricas = {m: calculadas[m] if m in propias else np.nan for m in METRICAS_VIVO}
     fuera = [
-        m for m in METRICAS_ALERTA
+        m for m in MEDICIONES[medicion]["alerta"]
         if metricas[m] > rango[f"{m}_max"] or (m not in SOLO_ARRIBA and metricas[m] < rango[f"{m}_min"])
     ]
-    return metricas | rango | {"fuera_de_rango": ",".join(fuera), "alerta": bool(fuera)}
+    return {"medicion": medicion} | metricas | rango | {"fuera_de_rango": ",".join(fuera), "alerta": bool(fuera)}
+
+
+def _ultimas_corridas(medidas: pd.DataFrame) -> pd.DataFrame:
+    """De cada origen y medición, la de su última corrida, como en results.json."""
+    return medidas.sort_values("fecha_corrida").groupby(["origen", "medicion"]).tail(1)
 
 
 def estados(medidas: pd.DataFrame) -> pd.Series:
-    """Estado de cada corrida medida (columnas origen, fecha_corrida y alerta): en rango, alerta, o revisión manual si
-    además tuvo alerta el origen medido anterior. De cada origen cuenta su última corrida, como en results.json."""
-    ultima = medidas.sort_values("fecha_corrida").groupby("origen")["alerta"].last().sort_index()
-    anterior = medidas["origen"].map(ultima.shift(1, fill_value=False)).astype(bool)
-    alerta = medidas["alerta"].astype(bool)
-    return pd.Series(np.select([alerta & anterior, alerta], ["revisión manual", "alerta"], "en rango"),
-                     index=medidas.index)
+    """Estado de cada medición (columnas origen, fecha_corrida, medicion y alerta): en rango, alerta, o revisión manual
+    si la misma medición también tuvo alerta en el origen anterior medido. De cada origen cuenta su última corrida.
+
+    Se compara la misma medición y no dos seguidas cualquiera: el mes 1 y el mes 2 de un pronóstico vienen del mismo
+    modelo y el mismo origen, así que un solo pronóstico malo pediría revisión.
+    """
+    resultado = pd.Series("en rango", index=medidas.index, dtype=object)
+    for _, del_tipo in medidas.groupby("medicion"):
+        ultima = _ultimas_corridas(del_tipo).set_index("origen")["alerta"].sort_index()
+        anterior = del_tipo["origen"].map(ultima.shift(1, fill_value=False)).astype(bool)
+        alerta = del_tipo["alerta"].astype(bool)
+        resultado[del_tipo.index] = np.select([alerta & anterior, alerta], ["revisión manual", "alerta"], "en rango")
+    return resultado
+
+
+def leer_reentrenar(texto: str) -> bool:
+    """El parámetro reentrenar del job: vacío en cada corrida normal, o `si` para entrenar y pronosticar aunque no toque
+    y repetir la semana aunque los datos no traigan un domingo nuevo."""
+    if texto.strip() not in ("", "si"):
+        raise ValueError(f"reentrenar tiene que ir vacío o con 'si', no {texto!r}")
+    return texto.strip() == "si"
+
+
+def decidir_reentrenamiento(
+    origen: pd.Timestamp, ultimo_pronostico: pd.Timestamp | None, medidas: pd.DataFrame, forzado: bool = False
+) -> tuple[bool, str]:
+    """Si la corrida de `origen` entrena y pronostica, y por qué.
+
+    Reentrena cuando pasaron 4 semanas desde el último origen pronosticado, o antes si alguna medición con alerta cerró
+    después del datos_hasta de ese pronóstico: la alerta trae información que el último entrenamiento no conocía. Una
+    alerta que ya conocía no vuelve a disparar, así que no reentrena cada semana mientras no cierre otra ventana.
+    `medidas` trae origen, fecha_corrida, medicion, cierre y alerta; de cada origen cuenta su última corrida.
+    """
+    if forzado:
+        return True, "reentrenar=si"
+    if ultimo_pronostico is None:
+        return True, "todavía no hay ningún pronóstico"
+    semanas = (origen - ultimo_pronostico).days // 7
+    if semanas >= SEMANAS_REENTRENAMIENTO:
+        return True, f"pasaron {semanas} semanas desde el origen {ultimo_pronostico.date()}"
+    conocido = ultimo_pronostico + pd.Timedelta(days=6)
+    ultimas = _ultimas_corridas(medidas)
+    nuevas = ultimas[ultimas["alerta"].astype(bool) & (pd.to_datetime(ultimas["cierre"]) > conocido)]
+    if len(nuevas):
+        detalle = ", ".join(f"{m.medicion} del origen {pd.Timestamp(m.origen).date()}"
+                            for m in nuevas.sort_values(["origen", "medicion"]).itertuples())
+        return True, f"alerta de desempeño posterior al origen {ultimo_pronostico.date()}: {detalle}"
+    return False, (f"van {semanas} semanas desde el origen {ultimo_pronostico.date()} y ninguna alerta posterior; "
+                   f"toca a las {SEMANAS_REENTRENAMIENTO}")
 
 
 def _porcentaje(metrica: str, valor: float) -> str:
-    return f"{valor:+.1%}" if metrica == "sesgo_total" else f"{valor:.1%}"
+    return f"{valor:+.1%}" if metrica.startswith("sesgo") else f"{valor:.1%}"
 
 
 def describir_rango(rango: dict[str, float]) -> str:
@@ -360,6 +425,10 @@ def describir_rango(rango: dict[str, float]) -> str:
 
 def describir_medida(medida) -> str:
     """Una medición en vivo en una línea, sin piezas."""
-    partes = [f"{m} {_porcentaje(m, medida[m])} (backtest {_porcentaje(m, medida[f'{m}_min'])} a "
-              f"{_porcentaje(m, medida[f'{m}_max'])})" for m in METRICAS_ALERTA]
-    return f"origen {pd.Timestamp(medida['origen']).date()}: " + ", ".join(partes) + f": {medida['estado']}"
+    medicion = MEDICIONES[medida["medicion"]]
+    alerta = [f"{m} {_porcentaje(m, medida[m])} (backtest {_porcentaje(m, medida[f'{m}_min'])} a "
+              f"{_porcentaje(m, medida[f'{m}_max'])})" for m in medicion["alerta"]]
+    dato = [f"{m} {_porcentaje(m, medida[m])}" for m in medicion["dato"] if pd.notna(medida[m])]
+    return (f"origen {pd.Timestamp(medida['origen']).date()}, {medida['medicion']} (cerró el "
+            f"{pd.Timestamp(medida['cierre']).date()}): " + ", ".join(alerta) + "; dato: " + ", ".join(dato)
+            + f": {medida['estado']}")

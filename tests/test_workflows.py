@@ -2,7 +2,7 @@
 por commit, los secretos solo llegan al env de los pasos que los usan y el usuario de Databricks se oculta antes de
 cualquier otro comando de Databricks. El CD solo despliega en prod desde main, nunca toca el schema de dev y solo corre
 el job o el export si se pide a mano, sin dejar en el log la salida de las tareas. Pages publica solo los datos de prod,
-después de un CD lanzado a mano, los valida sin secretos y solo su job publicar puede escribir en Pages."""
+después de un CD lanzado a mano o cada lunes, los valida sin secretos y solo su job publicar puede escribir en Pages."""
 import re
 from pathlib import Path
 
@@ -78,7 +78,7 @@ def test_cd_despues_del_merge_o_a_mano_y_solo_desde_main(cd):
         "accion": {
             "description": on["workflow_dispatch"]["inputs"]["accion"]["description"],
             "type": "choice",
-            "options": ["desplegar", "correr", "solo_export"],
+            "options": ["desplegar", "correr", "reentrenar", "solo_export"],
             "default": "desplegar",
         }
     }
@@ -92,7 +92,7 @@ def test_cd_solo_toca_prod(cd):
     texto = (WORKFLOWS / "cd.yml").read_text(encoding="utf-8")
     assert "tesis_dev" not in texto and "-t dev" not in texto
     comandos = [paso["run"] for paso in pasos(cd) if "databricks bundle" in paso.get("run", "")]
-    assert len(comandos) == 4  # validate, deploy, run y run del export
+    assert len(comandos) == 5  # validate, deploy y los tres run
     for comando in comandos:
         assert re.match(r"databricks bundle (validate|deploy|run) -t prod\b", comando)
         assert "--var" not in comando  # el schema sale del target prod: tesis
@@ -103,14 +103,18 @@ def test_cd_corre_el_job_o_el_export_solo_a_mano_y_sin_su_salida(cd):
     # al terminar, la CLI imprime en stdout lo que imprimió cada tarea, en piezas
     assert corridas == {
         "inputs.accion == 'correr'": "databricks bundle run -t prod demanda_pipeline > /dev/null",
+        "inputs.accion == 'reentrenar'":
+            "databricks bundle run -t prod demanda_pipeline --params reentrenar=si > /dev/null",
         "inputs.accion == 'solo_export'": "databricks bundle run -t prod demanda_pipeline --only export > /dev/null",
     }
 
 
-def test_pages_despues_de_un_cd_a_mano_en_main_o_a_mano(pages):
+def test_pages_despues_de_un_cd_a_mano_en_main_cada_lunes_o_a_mano(pages):
     on = disparadores(pages)
-    assert set(on) == {"workflow_run", "workflow_dispatch"}
+    assert set(on) == {"workflow_run", "schedule", "workflow_dispatch"}
     assert on["workflow_run"] == {"workflows": ["CD"], "types": ["completed"], "branches": ["main"]}
+    # dos horas después de la corrida programada del job, que GitHub no ve: lunes 9:00 en Bogotá (UTC−5)
+    assert on["schedule"] == [{"cron": "0 16 * * 1"}]
     # los merges solo despliegan: no publican
     assert " ".join(pages["jobs"]["descargar"]["if"].split()) == (
         "(github.event_name == 'workflow_run'"
@@ -119,6 +123,7 @@ def test_pages_despues_de_un_cd_a_mano_en_main_o_a_mano(pages):
         " && github.event.workflow_run.head_branch == 'main'"
         " && github.event.workflow_run.head_repository.full_name == github.repository)"
         " || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')"
+        " || github.event_name == 'schedule'"
     )
     assert pages["jobs"]["publicar"]["needs"] == "descargar"
     assert pages["concurrency"]["cancel-in-progress"] is False
