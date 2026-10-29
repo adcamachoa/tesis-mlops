@@ -442,7 +442,8 @@ Terminado cuando:
 - [x] Commit `fase 8b: monitoreo y drift`, por PR
 
 Manual:
-- [ ] Revisar la demostración antes del merge. Si el umbral de detención hubiera parado un origen sin datos rotos, se decide antes de enero.
+- [x] Revisar la demostración antes del merge. Si el umbral de detención hubiera parado un origen sin datos rotos, se decide antes de enero.
+  - Se revisó en el PR #7 (29-oct-2026), con la demostración por ventana, y cambió la regla de reentrenamiento: una alerta de desempeño ya no lo adelanta (ver "Decisión" en la fase 9b).
 - [x] Hacer merge y aprobar el despliegue en prod, sin correr el job
 
 Ajustes aprobados (28-oct-2026):
@@ -799,7 +800,8 @@ Manual:
   - BigQuery se actualiza a las 6:00 y el catálogo a las 6:30.
   - Si llegan después de las 9:00, el freno detiene la corrida programada; hay que lanzarla a mano con `gh workflow run cd.yml --ref main -f accion=correr`.
 - [ ] **Hacia el 15-dic-2026, hacer un commit al repo**, por ejemplo con el resultado de la medición del 21-dic. En un repo público, GitHub desactiva el schedule de `pages.yml` después de 60 días sin actividad, y tiene que seguir activo hasta el 18-ene-2027.
-- [ ] PR en `tesis-mlops-web` para usar los campos nuevos: `generar_ejemplo.py` tiene que generarlos (la validación de aquí los exige), y la página puede dibujarlos.
+- [x] PR en `tesis-mlops-web` para usar los campos nuevos: `generar_ejemplo.py` tiene que generarlos (la validación de aquí los exige), y la página puede dibujarlos.
+  - PR #6 de la web, con merge el 29-oct-2026.
 
 Terminado cuando:
 - [x] `make lint` y `make test` pasan, con las pruebas nuevas
@@ -950,16 +952,19 @@ Decisiones (29-oct-2026):
   - Costo: de 142 a 118 nodos. Se pierden 37 (24 series, 8 categorías, 3 "otras" y 2 departamentos) y entran 13 "otras". La venta visible en nodos de serie baja de 61 % a 35 %; en 12 categorías la única serie publicada se va a "otras", y la categoría, que vale casi lo mismo, sigue publicada.
 
 Manual:
-- [ ] PR en `tesis-mlops-web` que acepte la versión 1 y la 2, y publicarlo. El resumen para la web va al final de esta fase.
-- [ ] **Solo después**, revisar la prueba en dev, hacer merge del PR de la 9c y aprobar el despliegue en prod.
+- [x] PR en `tesis-mlops-web` que acepte la versión 1 y la 2, y publicarlo. El resumen para la web va al final de esta fase.
+  - PR #7 de la web, con merge el 29-oct-2026.
+- [x] **Solo después**, revisar la prueba en dev, hacer merge del PR de la 9c y aprobar el despliegue en prod.
   - El merge no publica: el job del lunes exporta en versión 2, y Pages lo publica a las 11:00.
   - Para no esperar al lunes: `gh workflow run cd.yml --ref main -f accion=solo_export`.
-- [ ] Revisar que `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` traiga `version_esquema` 2 y que la página lo muestre.
+  - Merge del PR #8 el 29-oct-2026, después del de la web, con el despliegue en prod. Después, `solo_export` y `pages.yml` terminaron en verde.
+- [x] Revisar que `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` traiga `version_esquema` 2 y que la página lo muestre.
+  - Publicado el 29-oct-2026: el origen 12-oct, con la corrida de prod de las 23:22:23, en versión 2 y con 118 nodos (1 total, 3 submarcas, 14 departamentos, 46 categorías, 25 series y 29 "otras"), los mismos que en dev.
 
 Terminado cuando:
 - [x] `make lint` y `make test` pasan, con las pruebas nuevas
 - [x] En dev, el export publica la versión 2 con el árbol y las métricas por nodo, y pasa la validación
-- [ ] Commit `fase 9c: jerarquía completa y métricas por nivel`, por PR, con el merge después del de la web
+- [x] Commit `fase 9c: jerarquía completa y métricas por nivel`, por PR (#8), con el merge después del de la web
 
 Diseño:
 - **El árbol** (`src/common/arbol.py`, funciones puras).
