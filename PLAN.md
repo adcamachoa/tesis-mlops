@@ -439,11 +439,11 @@ Terminado cuando:
 - [x] La demostración local muestra el drift y el error en vivo de cada origen, y si van juntos
 - [x] Los umbrales quedan en CLAUDE.md antes del merge
 - [x] En dev, las dos tareas nuevas terminan en verde y `predicciones` sigue intacta
-- [ ] Commit `fase 8b: monitoreo y drift`, por PR
+- [x] Commit `fase 8b: monitoreo y drift`, por PR
 
 Manual:
 - [ ] Revisar la demostración antes del merge. Si el umbral de detención hubiera parado un origen sin datos rotos, se decide antes de enero.
-- [ ] Hacer merge y aprobar el despliegue en prod, sin correr el job
+- [x] Hacer merge y aprobar el despliegue en prod, sin correr el job
 
 Ajustes aprobados (28-oct-2026):
 - Antes de fijar el 1,0 se calculó el PSI de los orígenes históricos, sin entrenar.
@@ -585,6 +585,11 @@ Resultado (28-oct-2026):
     - Con 13 semanas, como la corrida de enero en prod, el bloque nuevo cruza Buen Fin y diciembre, y aun así ningún origen normal se detiene.
   - **Solo vale porque el stock viene de los movimientos del almacén, independiente de la venta.** Está documentado en CLAUDE.md.
   - Sin salidas de stock en una semana nueva, venta entre salidas queda `sin datos`. El log dice que la venta del mes no se verificó, no se detiene el job y `aceptar_drift` no la vuelve estable.
+- **Merge (PR #4).**
+  - El CD esperó la aprobación y desplegó: actualizó el job `demanda_pipeline` (`1 changed`) y subió 28 archivos. El paso que corre el job se saltó, como debía.
+  - El job de prod quedó con las 7 tareas, todas con `--schema tesis`, el parámetro `aceptar_drift` y la programación en pausa.
+  - Sigue con una sola corrida, la primera de la fase 8 (28-oct-2026, 22:42 UTC): el despliegue no corrió nada.
+  - El log muestra el usuario como `***`.
 
 Pendiente (propuesto, sin implementar): **modo sin stock reciente.**
 - **Problema.** `features.py` corta en la fecha más temprana entre la venta y el stock. Si la venta llega a enero y el stock a octubre, el origen se queda en octubre: liberar el freno no produce un pronóstico nuevo.
@@ -611,36 +616,135 @@ Pendiente (propuesto, sin implementar): **modo sin stock reciente.**
 
 ---
 
-## Fase 9. Front en GitHub Pages
+## Fase 9. Datos públicos para la página
+
+Redefinida el 28-oct-2026. La página ya existe en el repo `tesis-mlops-web`: lee un `manifest.json` y un `results.json` por pronóstico desde una URL pública, con el contrato de su README. Esta fase ya no construye el front aquí. Genera esos archivos y los publica en el GitHub Pages de este repo, en `adcamachoa.github.io/tesis-mlops/datos/`.
 
 Manual:
 - [ ] En GitHub: Settings → Pages → Source: GitHub Actions
+- [ ] En Settings → Environments, revisar que `github-pages` solo acepte `main`
+- [ ] Revisar la prueba en dev antes del merge
+- [ ] Hacer merge del PR y aprobar el despliegue en prod. El merge solo despliega: `pages.yml` no publica.
+- [ ] Exportar en prod: `gh workflow run cd.yml --ref main -f accion=solo_export`, y aprobarlo. Al terminar en verde, `pages.yml` publica solo.
+- [ ] Comprobar que `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real y que pasa la validación
 
 Prompt para Claude Code:
 
 ```
-Ejecuta la Fase 9 de PLAN.md. Crea:
-1. front/template.html: página estática, limpia y responsive, que muestre
-   el título de la tesis, fecha de la última corrida, el champion y su versión,
-   una tabla comparativa de algoritmos en el formato estándar (WAPE y MAPE del
-   mes 1, el mes 2 y el total, y sesgo total; MAE y RMSE como complemento) con el
-   mejor resaltado, y un selector (total, submarca o serie) con un gráfico
-   Chart.js de real vs pronóstico.
-   Chart.js desde cdnjs. Todo el texto en español.
-2. front/build.py que lea results.json, valide el esquema e inyecte los datos
-   en el template generando dist/index.html. Con pruebas.
-3. .github/workflows/pages.yml que se dispare al terminar con éxito el
-   workflow de CD (workflow_run) y también con workflow_dispatch: descarga
-   results.json del Volume con databricks fs cp, corre build.py y publica dist/
-   con las acciones oficiales de GitHub Pages.
-Para probar en local, agrega un results.json de ejemplo en tests/data/.
-Propón el plan primero.
+Ejecuta la Fase 9 de PLAN.md: publicar los pronósticos para la página de
+tesis-mlops-web, con el diseño de esa sección. Haz:
+1. En src/common/results_schema.py, el esquema del manifest (versión 1) y una
+   función que valide el manifest junto con sus results.json, con las mismas
+   reglas que revisarManifest de tesis-mlops-web (docs/js/datos.js).
+2. En src/export_results.py, además del results.json de siempre, un
+   output/datos/<origen>/results.json por cada origen de predicciones (su
+   última corrida) y output/datos/manifest.json. Cada origen se arma solo con
+   datos hasta su datos_hasta y con las métricas del train que registró la
+   versión que pronosticó. Valida todo antes de escribir.
+3. En cd.yml, una casilla solo_export que corra solo la tarea export en prod.
+4. .github/workflows/pages.yml, que publica output/datos/ de prod en GitHub
+   Pages, con las condiciones y los dos jobs del diseño.
+5. Pruebas del manifest, de regenerar un origen viejo con datos posteriores
+   y de los workflows.
+6. Actualiza CLAUDE.md: results.json, el manifest, la estructura sin front/ y
+   que no se borran versiones del modelo en UC, porque el export las necesita
+   para regenerar los orígenes.
+La prueba en dev la corres tú, pidiéndome permiso en cada comando.
+Rama fase-9-publicacion y PR. Propón el plan primero.
 ```
 
 Terminado cuando:
-- [ ] `python front/build.py` genera un HTML correcto con el JSON de ejemplo
-- [ ] La página publicada en GitHub Pages muestra los resultados reales
-- [ ] Commit `fase 9: front`
+- [x] `make lint` y `make test` pasan, con las pruebas nuevas
+- [x] En dev, el export deja `output/datos/` con el manifest y un `results.json` por origen, y pasa la validación
+- [ ] El CD con `accion=solo_export` termina en verde en prod y `pages.yml` publica
+- [ ] `https://adcamachoa.github.io/tesis-mlops/datos/manifest.json` responde con el manifest real
+- [x] Commit `fase 9: datos públicos para la página`, por PR
+
+Ajustes aprobados (28-oct-2026):
+- En el CD, la casilla `correr` y la nueva `solo_export` quedan en un solo input de lista, `accion`, así que no pueden chocar.
+- `pages.yml` descarga de Databricks antes de instalar nada de PyPI, y valida después, sin secretos.
+- `results_schema` no cambia los nombres que importa `tesis-mlops-web` (`validar` con un argumento, `VERSION`, `ESCALA` y `BASE_INDICE`). Agrega:
+  - **Fechas que existan**, también en `results.json`. La web ya rechaza fechas como "2026-13-01".
+  - **`ErrorEsquema` con el nombre del archivo,** como argumento opcional.
+  - **El error de la venta en piezas no muestra el promedio,** porque sería la venta semanal del total y el error puede llegar a un log público.
+
+Diseño:
+- **Archivos.** `export_results.py` escribe en `/Volumes/workspace/<schema>/raw/output/`:
+  - `datos/<origen>/results.json`: uno por origen de `predicciones`, con su última corrida. El esquema no cambia (`version_esquema` 1).
+  - `datos/manifest.json`, en el formato 1 del README de la web: una entrada por origen, con `id` = el origen (`aaaa-mm-dd`), `ruta` = `<origen>/results.json`, `version_esquema`, `origen` y `fecha_prediccion`.
+  - `results.json`, como hoy, pasa a ser el mismo archivo del origen más reciente.
+  - En cada corrida vuelve a generar todos los orígenes desde las tablas, no solo el nuevo. Así lo publicado no depende de lo que haya quedado en el Volume.
+  - Arma y valida todo en memoria antes de escribir. Si algo falla, no escribe nada y lo anterior queda intacto.
+- **Cada origen se arma solo con datos hasta su `datos_hasta`.**
+  - **Venta real:** las 52 semanas hasta el origen, de `panel_semanal`. Las semanas posteriores no entran, tampoco en el factor del índice ni en la elección de las 20 series.
+  - **Pronóstico:** la última corrida de ese origen en `predicciones`. Las corridas de otros orígenes no entran.
+  - **Métricas:** las de la corrida de `metricas_modelos` que registró la versión que pronosticó, es decir, cuyo `run_id_modelo` es el run de esa versión en Unity Catalog. `fecha_entrenamiento` y `backtest` salen de la misma corrida.
+    - Hoy se toma la última corrida de `metricas_modelos`, que solo sirve para el origen más reciente.
+    - Nunca entran las métricas de un train posterior. Si no encuentra la corrida de una versión, falla con un mensaje claro y no escribe nada.
+  - **Prueba:** a las tablas de un origen viejo se les agregan semanas de venta posteriores, una corrida de train y una de predicción de un origen nuevo. El archivo del origen viejo sale idéntico, salvo `generado`.
+  - **Limitación:** si un refresco corrige la venta de semanas ya pasadas, la venta real de un origen viejo cambia al regenerarlo. El pronóstico y las métricas no cambian.
+- **Esquema del manifest** en `src/common/results_schema.py`, con las mismas reglas que `revisarManifest` de `tesis-mlops-web`:
+  - `version_manifest` = 1 y `generado` con fecha y hora;
+  - `pronosticos`: una lista no vacía;
+  - `id` con `^[a-z0-9-]+$`, y `ruta` con la misma expresión de la web: `^([A-Za-z0-9][A-Za-z0-9_.-]*/)*[A-Za-z0-9][A-Za-z0-9_.-]*\.json$`, es decir, relativa, sin `..`, `/` inicial ni `http`;
+  - `origen` y `fecha_prediccion` con fechas que existen, y `version_esquema` entero;
+  - `id` y `origen` únicos;
+  - cada `results.json` de la lista cumple `validar` y trae en `corrida` el mismo `origen` y `fecha_prediccion` que su entrada.
+  - Las pruebas rechazan los mismos casos que `pruebas/datos.test.js` de la web: sin pronósticos, ruta con `..`, absoluta o a otro sitio, `id` con espacios, fecha que no existe, origen o `id` repetido, y `version_manifest` 2 o ausente.
+  - Si la web cambia sus reglas, se cambian aquí también.
+- **Acción `solo_export` en el CD.**
+  - La casilla `correr` pasa a ser un input de lista, `accion`: `desplegar` (por defecto), `correr` o `solo_export`. Como se elige una sola, no hay choque que revisar. La corrida completa ahora se pide con `-f accion=correr`.
+  - Con `solo_export`, despliega como siempre y corre solo la tarea export en prod (`bundle run -t prod demanda_pipeline --only export`). Son unos 3 minutos en vez de 45, con la misma aprobación del environment `prod`.
+  - Descarta stdout, igual que `correr`.
+  - Sirve para publicar ya el pronóstico del 12-oct-2026 sin esperar a enero, y para volver a exportar si cambia el formato.
+- **`pages.yml`.**
+  - **Cuándo corre.** Con `workflow_run` del CD y con `workflow_dispatch`.
+    - Con `workflow_run`, solo si el CD terminó en `success`, fue lanzado con `workflow_dispatch` y fue sobre `main`, desde este mismo repo. Los merges que solo despliegan no cambian datos, así que no publican.
+    - `workflow_run` no trae la acción elegida en el CD: uno lanzado a mano con `accion=desplegar` también publica, con los mismos datos. No hace daño.
+    - Con `workflow_dispatch`, solo desde `main`.
+    - Nunca `pull_request` ni `pull_request_target`.
+  - **Job `descargar`**, el único con secretos, y solo en los pasos que los usan.
+    - Oculta el usuario de Databricks con `::add-mask::`.
+    - Descarga `/Volumes/workspace/tesis/raw/output/datos/` con `databricks fs cp -r`: siempre `tesis`, nunca `tesis_dev`.
+    - Después de descargar instala Python 3.11 y, de PyPI, solo pandas, numpy y jsonschema, con los rangos de `requirements.txt`. Así ningún paquete de PyPI está instalado mientras se usan los secretos.
+    - Valida sin secretos, con `python -m common.results_schema`, que el manifest y los archivos coincidan: cada entrada con su archivo y ningún archivo fuera del manifest. Si algo falla, no publica y lo que ya estaba en Pages queda igual.
+    - Sube la carpeta como artefacto de Pages, con `datos/` en la raíz del sitio.
+  - **Job `publicar`**, sin secretos: el único con `pages: write` e `id-token: write`, con el environment `github-pages`.
+  - Una publicación a la vez. Cada una reemplaza el sitio completo, y como el export regenera todos los orígenes, no se pierde ninguno.
+  - El token del workflow solo lee, las acciones van fijadas por commit y el log no muestra piezas: solo rutas, fechas y conteos.
+  - La raíz del sitio no tiene página. La página es la de `tesis-mlops-web`, en el mismo dominio, así que lee los datos sin configuración extra.
+- **Pruebas.**
+  - `tests/test_export_results.py`: un archivo por origen, con su última corrida y las métricas de su versión; regenerar un origen viejo con datos posteriores da el mismo archivo, salvo `generado`; si un origen no cumple el esquema, no se escribe nada.
+  - El manifest válido y cada caso que rechaza la web.
+  - `tests/test_workflows.py`:
+    - `pages.yml`: las condiciones del disparo, los secretos solo en `descargar` y en los pasos que los usan, la máscara antes de Databricks, solo `tesis`, y los permisos de escritura solo en `publicar`;
+    - `cd.yml`: `accion` con sus tres opciones, y `solo_export` con `--only export`, `-t prod` y sin su salida.
+  - `tests/test_bundle.py` no cambia: el bundle sigue declarando solo el job.
+- **Prueba en dev.** `bundle deploy -t dev` y `bundle run -t dev demanda_pipeline --only export`, unos minutos de cuota.
+  - Se descarga `output/datos/` de `tesis_dev` y se valida en local con la misma función. Debe traer el origen del 12-oct-2026 con la corrida de las 17:47:13, la última de ese origen.
+  - `pages.yml` nunca lee dev.
+
+Resultado (28-oct-2026):
+- **Pruebas.** `make lint` pasa y `make test` da 144 pruebas en verde, con las nuevas del export, del manifest y de los workflows.
+  - Como control cruzado, el ejemplo sintético de `tesis-mlops-web` (`docs/datos/ejemplo/`, dos orígenes) pasa `python -m common.results_schema`, así que las reglas de los dos repos coinciden.
+- **Dev.**
+  - `bundle deploy -t dev` subió 12 archivos sin cambiar el job.
+  - `bundle run -t dev demanda_pipeline --only export` terminó en verde en 1,5 minutos.
+- **`output/datos/` de `tesis_dev`,** descargado con el mismo `databricks fs cp -r` de `pages.yml`. Copia el contenido de `datos/` en la carpeta de destino, y el log solo muestra rutas.
+  - Trae `manifest.json` y `2026-10-12/results.json`, y pasa la validación.
+  - El origen es el 12-oct-2026, con la corrida de las 17:47:13, la última de ese origen, y la versión 3.
+  - Las métricas son las del train que registró la versión 3, el de las 17:43:07: backtest de 8 orígenes, del 29-dic-2025 al 13-jul-2026.
+  - `lightgbm_tweedie_211` es el champion y el mejor, con WAPE tipo × mes de 43,8 %, igual que en la fase 6.
+  - Trae 24 series (el total, 3 submarcas y 20 series), y la venta real del total promedia 100,0.
+- **Tablas.** El export solo lee `predicciones`, `metricas_modelos` y `panel_semanal`, y busca las versiones en Unity Catalog: no escribe en ninguna tabla.
+- **Horas en UTC.** `generado` y `fecha_prediccion` van en UTC, la hora de Databricks serverless, como `fecha_corrida` en las tablas.
+
+Fuera de esta fase:
+- **El PR de `docs/config.js` en `tesis-mlops-web`**: `url` a `https://adcamachoa.github.io/tesis-mlops/datos/` y `sinteticos: false`, y activar su Pages.
+  - Va desde ese repo, como dice su CLAUDE.md.
+  - **Va solo cuando el manifest real ya responde en la URL.** Antes, la página apuntaría a una carpeta vacía y mostraría un error en vez del ejemplo.
+- El semáforo del monitoreo en la página.
+- Las propuestas de la versión 2 de `results.json` del README de la web.
 
 ---
 

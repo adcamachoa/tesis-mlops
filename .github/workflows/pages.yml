@@ -1,0 +1,111 @@
+# Pages: publica en GitHub Pages los datos de la página (manifest.json y un results.json por origen) que deja la tarea
+# export en el Volume de prod. La página está en tesis-mlops-web y los lee de adcamachoa.github.io/tesis-mlops/datos/.
+#
+# - Corre cuando el CD termina bien después de lanzarlo a mano sobre main, y a mano desde main. Los merges solo
+#   despliegan y no cambian los datos, así que no publican. workflow_run no trae la acción elegida en el CD: uno lanzado
+#   a mano que solo despliega también publica, con los mismos datos.
+# - Lee siempre el schema tesis, nunca el de dev.
+# - Valida el manifest y los results.json con common.results_schema, con las reglas de la página, y que no sobre ningún
+#   archivo. Si algo falla, no publica y lo que ya estaba en Pages queda igual.
+# - Cada publicación reemplaza el sitio completo. Como el export regenera todos los orígenes, no se pierde ninguno.
+#
+# El repo es público, así que:
+# - Solo el job descargar tiene secretos, y solo en los pasos que los usan. El usuario de Databricks se oculta a mano.
+# - Python y los paquetes de PyPI se instalan después de la descarga: nada instalado de PyPI corre mientras se usan los
+#   secretos, y la validación corre sin ellos.
+# - Solo el job publicar, que no tiene secretos, puede escribir en Pages.
+# - El log no lleva piezas: solo rutas, fechas y conteos.
+# - Las acciones van fijadas por commit, no por etiqueta.
+name: Pages
+
+on:
+  workflow_run:
+    workflows: [CD]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# una publicación a la vez, y la que llega espera sin cancelar a la que está en curso
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash  # con -o pipefail: si falla un comando de una tubería, falla el paso
+
+jobs:
+  descargar:
+    # con workflow_run, solo un CD que terminó bien, lanzado a mano sobre main y desde este repo; a mano, solo desde main
+    if: >-
+      (github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'workflow_dispatch'
+      && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.head_repository.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: databricks/setup-cli@8de769ec2543ee05e456ee2121350efc7efc4bda  # v1.22.1
+        with:
+          version: 1.22.1  # la misma versión que en local
+
+      - name: Ocultar el usuario de Databricks en el log
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          usuario=$(databricks current-user me --output json | python3 -c 'import json, sys; print(json.load(sys.stdin)["userName"])')
+          test -n "$usuario"
+          echo "::add-mask::$usuario"
+
+      # siempre el schema tesis; copia el contenido de datos/ en sitio/datos/
+      - name: Descargar los datos de prod
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks fs cp -r dbfs:/Volumes/workspace/tesis/raw/output/datos sitio/datos
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"  # como la imagen de Docker y Databricks
+
+      # results_schema usa constantes de common.features y common.metrics, que importan pandas y numpy; los rangos
+      # salen de requirements.txt
+      - name: Instalar lo que usa la validación
+        run: |
+          grep -E '^(jsonschema|numpy|pandas)[<>=]' requirements.txt > "$RUNNER_TEMP/validacion.txt"
+          python -m pip install -r "$RUNNER_TEMP/validacion.txt"
+
+      - name: Validar el manifest y los results.json
+        env:
+          PYTHONPATH: src
+        run: python -m common.results_schema sitio/datos
+
+      # datos/ queda en la raíz del sitio: adcamachoa.github.io/tesis-mlops/datos/manifest.json
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: sitio
+
+  publicar:
+    needs: descargar
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # el único job que puede escribir en Pages
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.publicar.outputs.page_url }}
+    steps:
+      - id: publicar
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1

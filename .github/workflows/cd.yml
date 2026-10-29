@@ -1,9 +1,13 @@
-# CD: después de cada merge a main despliega el bundle en prod, y corre el job solo si se pide a mano.
+# CD: después de cada merge a main despliega el bundle en prod, y corre el job o el export solo si se pide a mano.
 #
 # - Corre en push a main, solo si cambia algo que va al job, y con workflow_dispatch. Nunca en un pull request.
 # - El job usa el environment prod: GitHub pide aprobación antes de empezar y solo acepta la rama main.
-# - Desplegar no gasta cómputo: sube el código y la definición del job, no corre nada ni toca tablas. Correr el job
-#   (unos 45 min de cuota) solo pasa con workflow_dispatch y la casilla correr.
+# - Desplegar no gasta cómputo: sube el código y la definición del job, no corre nada ni toca tablas. Con
+#   workflow_dispatch, la acción elige qué más hace:
+#   - desplegar (por defecto): nada más;
+#   - correr: el job completo, unos 45 min de cuota;
+#   - solo_export: solo la tarea export, unos 3 min, que vuelve a generar los datos de la página desde las tablas.
+#   Al terminar bien un CD lanzado a mano, pages.yml publica los datos.
 # - Todo va con -t prod, el target del schema tesis: el CD nunca toca el schema de dev.
 #
 # El repo es público, así que:
@@ -23,10 +27,14 @@ on:
       - .github/workflows/cd.yml
   workflow_dispatch:
     inputs:
-      correr:
-        description: Correr el job demanda_pipeline en prod después de desplegar (unos 45 min de cuota)
-        type: boolean
-        default: false
+      accion:
+        description: "Qué hacer en prod después de desplegar: nada, correr el job (unos 45 min de cuota) o solo el export (unos 3 min)"
+        type: choice
+        options:
+          - desplegar
+          - correr
+          - solo_export
+        default: desplegar
 
 permissions:
   contents: read
@@ -87,8 +95,17 @@ jobs:
       # tarea (métricas y pronóstico en piezas), así que stdout se descarta. El progreso y el error de una tarea que
       # falle van por stderr y sí quedan en el log.
       - name: Correr el job en prod
-        if: inputs.correr
+        if: inputs.accion == 'correr'
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
           DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: databricks bundle run -t prod demanda_pipeline > /dev/null
+
+      # Solo la tarea export: vuelve a generar los datos de la página desde las tablas, sin entrenar ni pronosticar.
+      # Descarta stdout igual que la corrida completa.
+      - name: Exportar en prod
+        if: inputs.accion == 'solo_export'
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: databricks bundle run -t prod demanda_pipeline --only export > /dev/null
