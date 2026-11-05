@@ -1028,6 +1028,53 @@ Para `tesis-mlops-web`:
 
 ---
 
+## Fase 9d. Cambio de catálogo del 2-nov-2026
+
+El lunes 2-nov-2026 llegó un catálogo que el negocio corrigió a propósito: 6.017 SKU con otra jerarquía (el 12 % del catálogo) y 1.384 SKU nuevos. Aparecen categorías nuevas, como "Pijamas y Mamelucos", "Suéteres, Sudaderas y Chamarras", "Pantalones y Shorts" y "Zapatos".
+
+Qué pasó:
+- `ingest` siguió, como dice la regla de la llave: los cambios de jerarquía solo van al log.
+- **El export falló el 2-nov (programado) y el 4-nov (a mano)** con "los hijos de Total no suman el nodo en pronostico" en el origen 12-oct.
+  - 53 de las 464 series del pronóstico del 12-oct ya no existían en `panel_semanal`, con el 10,6 % del pronóstico.
+  - El export arma el árbol con el catálogo actual: el Total suma todo el pronóstico, pero los hijos solo las series que siguen existiendo.
+  - La validación lo detuvo sin escribir nada. La página siguió con el export del 29-oct, con venta real hasta el 18-oct.
+
+Lo que se hizo (4-nov-2026): rehacer el pronóstico del 12-oct con el catálogo corregido, sin mover el calendario.
+1. **Respaldo** local de los 5 parquet de prod, con corte al 1-nov, en `data/prod_corte_20261101/`.
+2. **Recorte al 18-oct** de ventas, stock y quiebres, con el mismo esquema, en `data/prod_corte_20261018/`. Productos y calendario son los del 2-nov.
+   - Contra el corte original del 18-oct, stock y quiebres son idénticos, y ventas tiene 4 filas menos, que son correcciones del refresco.
+3. **`accion=reentrenar`** con los recortados en el Volume: 43 min, de los que train son 35,8.
+   - Versión 2 de `demanda_forecast` con el alias champion: `lightgbm_tweedie_211`, el algoritmo del champion, reentrenado.
+   - Pronóstico nuevo del 12-oct (corrida 2026-11-05 02:57:17), con 464 series. El monitoreo de datos dio todo estable.
+4. **Los parquet completos de vuelta** en el Volume de prod.
+5. **`accion=correr`**, unos 5 min: no reentrena, porque van 2 semanas desde el 12-oct. El export publica la venta real hasta el 1-nov, y Pages publicó el 12-oct con la versión 2, las categorías corregidas y 118 nodos.
+
+Por qué así:
+- **No usa información del futuro.** Entrena con la venta hasta el 18-oct, como el pronóstico original, que también se hizo después, el 28-oct. Lo único nuevo es la clasificación corregida.
+- **El calendario no cambia.** El último origen de `predicciones` sigue siendo el 12-oct, así que reentrena el 16-nov, con el origen 9-nov.
+- **El pronóstico original sigue en `predicciones`** (corrida 2026-10-28 23:22:23, versión 1). La página y la revisión manual usan la última corrida de cada origen.
+
+Resultado:
+- **El catálogo corregido casi no cambia el backtest del champion:**
+
+  | Champion | WAPE M1 | WAPE M2 | WAPE Total | Sesgo total | WAPE tipo × mes |
+  |---|---|---|---|---|---|
+  | Versión 1 (28-oct, catálogo anterior) | 35,5 % | 45,0 % | 36,4 % | +2,7 % | 43,8 % |
+  | Versión 2 (4-nov, catálogo corregido) | 35,3 % | 44,8 % | 36,3 % | +2,3 % | 43,7 % |
+
+- **`monitoreo_desempeno` mide las dos corridas del 12-oct.** La de la versión 1 cruza sus series viejas con la venta en el catálogo nuevo, así que no es comparable: el rango de su backtest sale de 41,5 % a 70,4 % en WAPE M1, contra 23,7 % a 49,1 % en la versión 2. Para la tesis cuenta la de la versión 2.
+- **Aviso de cobertura:** `filas_venta` da 0,75 en la semana del 26-oct, justo en el umbral, igual que el 2-nov con los mismos datos. La venta entre salidas del mes da 0,76, estable. Hay que revisar el lunes 9-nov si la semana nueva vuelve a lo normal.
+
+Pendiente: protección automática.
+- **Hoy, un cambio de jerarquía que deja sin SKU una serie ya pronosticada detiene el export en cada corrida.** El export regenera todos los orígenes, y `pronostico_anterior` cruza los de hasta 52 semanas atrás.
+- **Repetir lo de hoy sirve mientras haya un solo origen.** Con más, habría que rehacer cada uno, a unos 41 min de cuota por origen. Por eso conviene la protección antes de que se acumulen orígenes.
+- **Propuesta:**
+  - guardar con cada pronóstico una foto del catálogo (SKU → serie);
+  - antes de cruzar un pronóstico con la venta real, en el export y en `monitoreo_desempeno`, traducirlo al catálogo vigente, repartiendo cada serie vieja entre las nuevas según la venta de sus SKU hasta el origen y conservando el total;
+  - dar un aviso en `monitoreo_datos` cuando el catálogo cambie mucho, sin detener el job.
+
+---
+
 ## Fase 10. Ensayo de sustentación (Manual, con ayuda de Claude Code)
 
 - [ ] Hacer un cambio pequeño en una rama (por ejemplo, agregar un algoritmo o ajustar un parámetro) y recorrer el flujo completo: PR → CI verde → merge → CD → job → página actualizada

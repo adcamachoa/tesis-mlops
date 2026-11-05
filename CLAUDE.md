@@ -30,7 +30,7 @@ El plan por fases está en `PLAN.md`: una fase por sesión, y siempre proponer e
 - **Corte:** datos hasta el domingo 18-oct-2026 (`data/_extraccion.json`). Los volúmenes son reales; lo anonimizado son los identificadores.
 - **Carga semanal en prod.** Cada lunes, entre las 6:45 y las 9:00 de Bogotá, se exportan y suben al Volume de prod los 5 parquet con corte al domingo, con un solo comando. BigQuery se actualiza a las 6:00 y el catálogo a las 6:30.
   - Vienen de una exportación nueva que reutiliza la llave: los códigos existentes no cambian y solo se agregan los SKU nuevos.
-  - `local` y `tesis_dev` se quedan con el corte del 18-oct.
+  - `local` y `tesis_dev` se quedan con el corte del 18-oct y el catálogo anterior. Prod tiene desde el 2-nov-2026 el catálogo que corrigió el negocio (fase 9d de PLAN.md).
 
 | Archivo | Grano | Columnas | Filas |
 |---|---|---|---|
@@ -124,6 +124,7 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
   - Si los parquet llegan después de las 9:00, la corrida programada se detiene y hay que lanzarla a mano.
 - **Llave.** `ingest` se detiene si falta algún SKU que ya estaba cargado, o si más del 1 % de los existentes cambia de `estilo` o `estilo_color`, como pasaría con una llave regenerada.
   - El catálogo se edita, así que los cambios sueltos de estilo y los de jerarquía solo van al log, con su conteo.
+  - Pero un cambio de jerarquía que deja sin SKU una serie ya pronosticada detiene el export en cada corrida, porque los hijos del Total dejan de sumarlo. Pasó el 2-nov-2026: lo que se hizo y la protección pendiente están en la fase 9d de PLAN.md.
 - **Parámetros del job**, vacíos en cada corrida normal:
   - `aceptar_drift=<origen>`: sigue con un drift extremo ya revisado;
   - `reentrenar=si`: entrena y pronostica aunque no toque, y se salta el freno.
