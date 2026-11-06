@@ -1,6 +1,6 @@
 # tesis-mlops
 
-Pipeline MLOps de la tesis de maestría para pronosticar la demanda semanal de una marca de moda infantil que vende en e-commerce y marketplaces en México. Los datos y los jobs viven en Databricks Free Edition, el CI/CD en GitHub Actions y la página de resultados en GitHub Pages. El dataset está anonimizado y no se versiona.
+Pipeline MLOps de la tesis de maestría para pronosticar la demanda semanal de una marca de moda infantil que vende en e-commerce y marketplaces en América Latina. Los datos y los jobs viven en Databricks Free Edition, el CI/CD en GitHub Actions y la página de resultados en GitHub Pages. El dataset está anonimizado y no se versiona.
 
 La estructura del repositorio, los datos y las decisiones de modelado están en [CLAUDE.md](CLAUDE.md); el plan por fases, en [PLAN.md](PLAN.md).
 
