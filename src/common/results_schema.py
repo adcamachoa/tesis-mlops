@@ -9,7 +9,8 @@ como `semanas.real`, que haya un solo total y que la venta real del total promed
 `real_hasta`, y que el pronóstico anterior cubra las mismas semanas en todas las series. Del árbol revisa que los `id`
 no se repitan, que cada padre exista y sea del nivel anterior, que ningún nodo baje del índice mínimo (por debajo, sus
 valores de 1 a 3 piezas dejarían ver el escalón de una pieza), que los hijos sumen su padre en cada valor (si no,
-restarlos dejaría ver lo que no se publicó) y que cada nodo traiga los modelos de `metricas`. La página es pública:
+restarlos dejaría ver lo que no se publicó), que cada nodo traiga los modelos de `metricas` y que su MAE venga con 1
+decimal (ver DECIMALES_MAE_NODO). La página es pública:
 la venta y el pronóstico van como índice, nunca en piezas.
 
 `ESQUEMA_MANIFEST` y `validar_manifest` siguen las reglas de revisarManifest de tesis-mlops-web (docs/js/datos.js): si
@@ -40,8 +41,17 @@ BASE_INDICE = 100
 ESCALA = "índice: 100 = venta semanal promedio del total en las semanas de venta real mostradas"
 TOLERANCIA_BASE = 0.1  # el promedio del total se calcula con los valores ya redondeados
 REDONDEO = 0.05  # lo que puede moverse un valor al redondearlo a 1 decimal
-# el formato estándar de cada nodo, sin MAE ni RMSE (van en piezas) ni el WAPE tipo × mes (es de los tipos de producto)
-METRICAS_NODO = ("wape_m1", "wape_m2", "wape_total", "mape_m1", "mape_m2", "mape_total", "sesgo_total")
+# el formato estándar de cada nodo, más el mes 3 y el MAE (en índice, con 1 decimal), sin RMSE ni el WAPE tipo × mes (es
+# de los tipos de producto)
+METRICAS_NODO = (
+    "wape_m1", "wape_m2", "wape_m3", "wape_total",
+    "mape_m1", "mape_m2", "mape_m3", "mape_total",
+    "sesgo_total", "mae",
+)
+# Con 4 decimales, el MAE y el WAPE de cada mes de los 6 modelos dejarían despejar la venta del nodo en cada mes del
+# backtest con una precisión de menos de una pieza, y con todos los nodos se podría buscar el factor: va con 1 decimal,
+# como la venta.
+DECIMALES_MAE_NODO = 1
 
 # además de su forma, las fechas tienen que existir (no "2026-13-01"), como en la página
 _FORMATOS = FormatChecker(formats=())
@@ -123,9 +133,11 @@ ESQUEMA = {
                         "nivel": {"enum": [*NIVELES, OTRAS]},
                         "nombre": _TEXTO,  # el completo: "Submarca A | Departamento | Categoría | Tipo"
                         "etiqueta": _TEXTO,  # el del nodo solo
-                        # el formato estándar del backtest, con la venta y el pronóstico sumados al nodo
+                        # el formato estándar del backtest, con la venta y el pronóstico sumados al nodo, más el mes 3
+                        # y el MAE en índice
                         "metricas": _lista(
-                            _objeto({"modelo": _TEXTO, **dict.fromkeys(METRICAS_NODO, _METRICA)})
+                            _objeto({"modelo": _TEXTO, **dict.fromkeys(METRICAS_NODO, _METRICA),
+                                     "mae": {"type": ["number", "null"], "minimum": 0}})
                         ),
                         "real": _lista(_INDICE),
                         "pronostico": _lista(_INDICE, HORIZONTE),
@@ -254,6 +266,9 @@ def _problemas_del_arbol(resultados: dict) -> list[str]:
                 problemas.append(f"el nodo {nombre} no llega al índice mínimo de {resultados['indice_minimo']}")
         if [m["modelo"] for m in nodo["metricas"]] != modelos:
             problemas.append(f"el nodo {nombre} no trae en metricas los mismos modelos que la raíz")
+        if any(m["mae"] is not None and round(m["mae"], DECIMALES_MAE_NODO) != m["mae"] for m in nodo["metricas"]):
+            problemas.append(f"el nodo {nombre} trae el MAE con más de {DECIMALES_MAE_NODO} decimal: con más, se "
+                             f"podría despejar la escala")
     # los hijos suman su padre, salvo el redondeo de cada uno: si no, restarlos dejaría ver lo que no se publicó
     for padre_id, de_padre in hijos.items():
         padre = por_id[padre_id]

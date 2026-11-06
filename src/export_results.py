@@ -18,10 +18,10 @@ En las semanas sin reentrenamiento, el pronóstico publicado no cambia: solo se 
 Publica el árbol total → submarca → departamento → categoría → serie (common.arbol), podado en el índice mínimo, con
 nodos `otras` para lo chico. Cada nodo trae la venta real de las 52 semanas, el pronóstico de las 13 semanas y de las 3
 ventanas, su venta real, el pronóstico vigente en las semanas pasadas y el formato estándar de cada modelo en su
-backtest, sumado al nodo: sale de las predicciones del backtest que train.py guarda en el run de cada modelo, así que
-tampoco se borran esos runs. La página es pública, así que todo va como índice: 100 es la venta semanal promedio del
-total en las 52 semanas hasta el origen, y el mismo factor se aplica a todos los nodos, a todos los campos y al MAE y el
-RMSE. La tabla predicciones sigue en piezas.
+backtest, más el mes 3 y el MAE, sumado al nodo: sale de las predicciones del backtest que train.py guarda en el run de
+cada modelo, así que tampoco se borran esos runs. La página es pública, así que todo va como índice: 100 es la venta
+semanal promedio del total en las 52 semanas hasta el origen, y el mismo factor se aplica a todos los nodos, a todos los
+campos y al MAE y el RMSE. El MAE de cada nodo va con 1 decimal, como la venta. La tabla predicciones sigue en piezas.
 
 Todo se valida con common.results_schema antes de escribir en /Volumes/<catalogo>/<schema>/raw/output/:
 datos/<origen>/results.json (compacto), datos/manifest.json y results.json, que es el mismo archivo del origen más
@@ -93,18 +93,31 @@ def pronostico_vigente(anteriores: pd.DataFrame) -> pd.DataFrame:
     return semanal[semanal["origen"] == semanal.groupby("fecha_inicio")["origen"].transform("max")]
 
 
-def metricas_por_nodo(ventanas_backtest: dict[str, pd.DataFrame], nodos: list[arbol.Nodo]) -> dict[str, list[dict]]:
-    """Por nodo, el formato estándar de cada modelo en su backtest, con la venta y el pronóstico de cada origen y
-    ventana sumados al nodo. `ventanas_backtest` trae, por modelo y en el orden de `metricas`, el resultado de
-    metrics.a_ventanas: todas las series, con las que no se pronosticaban en pronóstico 0."""
+def _metrica_nodo(nombre: str, valor, factor: float) -> float | None:
+    """Una métrica de un nodo: el MAE como índice, con el mismo factor y 1 decimal (ver
+    results_schema.DECIMALES_MAE_NODO); las demás son proporciones."""
+    if nombre not in EN_PIEZAS:
+        return _metrica(valor)
+    return None if pd.isna(valor) else round(float(valor) * factor, results_schema.DECIMALES_MAE_NODO)
+
+
+def metricas_por_nodo(
+    ventanas_backtest: dict[str, pd.DataFrame], nodos: list[arbol.Nodo], factor: float
+) -> dict[str, list[dict]]:
+    """Por nodo, el formato estándar de cada modelo en su backtest, más el mes 3 y el MAE, con la venta y el pronóstico
+    de cada origen y ventana sumados al nodo. `ventanas_backtest` trae, por modelo y en el orden de `metricas`, el
+    resultado de metrics.a_ventanas: todas las series, con las que no se pronosticaban en pronóstico 0. El MAE del nodo
+    es el de sus celdas origen × ventana, así que el del total no es el de la raíz, que promedia celdas serie ×
+    ventana."""
     por_nodo = {nodo.id: [] for nodo in nodos}
     for modelo, ventanas in ventanas_backtest.items():
         for nodo in nodos:
             del_nodo = ventanas if nodo.nivel == "total" else ventanas[ventanas["serie"].isin(nodo.series)]
             sumadas = del_nodo.groupby(["origen", "ventana"], as_index=False)[["real", "pronostico"]].sum()
-            estandar = metrics.formato_estandar(sumadas.assign(serie=nodo.id))
+            calculadas = metrics.formato_estandar(sumadas.assign(serie=nodo.id)) | metrics.mes_tres(sumadas)
             por_nodo[nodo.id].append(
-                {"modelo": modelo, **{m: _metrica(estandar[m]) for m in results_schema.METRICAS_NODO}}
+                {"modelo": modelo,
+                 **{m: _metrica_nodo(m, calculadas[m], factor) for m in results_schema.METRICAS_NODO}}
             )
     return por_nodo
 
@@ -151,7 +164,7 @@ def construir_resultados(
     # el peso de cada serie para publicar su nodo: el índice promedio semanal de su venta real
     pesos = real.groupby("serie")["venta"].sum() * factor / SEMANAS_REALES
     nodos = arbol.construir(panel[["serie", *SERIE]], pesos, minimo)
-    metricas_nodo = metricas_por_nodo(ventanas_backtest, nodos)
+    metricas_nodo = metricas_por_nodo(ventanas_backtest, nodos, factor)
 
     def serie(nodo: arbol.Nodo) -> dict:
         """El nodo con sus valores como índice."""

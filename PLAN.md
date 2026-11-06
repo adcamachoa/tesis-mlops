@@ -1099,6 +1099,37 @@ Pendiente:
 
 ---
 
+## Fase 9e. Mes 3 y MAE en las métricas de cada nodo
+
+A pedido de `tesis-mlops-web` (6-nov-2026), `series[].metricas` suma `wape_m3`, `mape_m3` y `mae`. La página los muestra en la tabla de modelos de cada nodo: WAPE de los meses 1, 2 y 3 y total, sesgo total y MAE.
+
+Decisiones (6-nov-2026):
+- **Se queda en la versión 2.** Solo se agregan campos y ninguno cambia de significado. La página de antes lee las métricas por nombre e ignora las que no conoce, y la nueva acepta los archivos con los 3 campos o sin ellos.
+- **`mape_m3` también,** para que cada ventana y el total tengan su WAPE y su MAPE.
+- **El formato estándar no cambia.** El mes 3 sale de `metrics.mes_tres`, aparte. La raíz, `train`, `metricas_modelos`, MLflow y el monitoreo siguen igual.
+- **El MAE del nodo va en índice, con el mismo factor y con 1 decimal,** y no con 4 como el de la raíz. `validar` lo exige.
+  - Es la primera métrica del nodo con escala; las demás son proporciones.
+  - Con 4 decimales, como la venta real es la misma para los 6 modelos, el MAE y el WAPE de los 3 meses de cada modelo dejarían despejar la venta del nodo en cada mes del backtest. Se revisó con los datos locales del 12-oct: el error del despeje queda por debajo de una pieza, y con 118 nodos se podría buscar el factor que los vuelve piezas enteras.
+  - Con 1 decimal, el error es de cientos de piezas.
+  - Es el `wape_m3` el que cierra ese sistema: sin el mes 3, el error del mes 3 de cada modelo quedaba como otra incógnita y el despeje no se podía hacer. Por eso el riesgo aparece con los dos campos juntos.
+- **El MAE del nodo Total no es el de la raíz.** El de la raíz promedia celdas serie × ventana; el del nodo, las celdas origen × ventana ya sumadas.
+- **Sin RMSE,** porque no se pidió.
+
+Terminado cuando:
+- [x] `make lint` y `make test` pasan, con las pruebas nuevas
+- [x] En dev, el export publica los 3 campos, con el MAE con 1 decimal, y pasa la validación
+- [ ] PR con merge, y `solo_export` en prod para que los datos publicados los traigan
+
+Resultado (6-nov-2026):
+- **Pruebas.** `make lint` pasa y `make test` da 189 pruebas en verde.
+  - Las nuevas cubren el mes 3 aparte del formato estándar, las métricas de una serie y del total contra cálculos independientes (con el MAE escalado), que todo MAE de nodo venga con 1 decimal, y que `validar` rechace un MAE con 4 decimales o un nodo sin el mes 3.
+- **Dev** (`bundle run -t dev demanda_pipeline --only export`, unos 2,5 min).
+  - Los 118 nodos traen los 3 campos en sus 708 filas de métricas, el MAE con 1 decimal y sin nulos.
+  - `output/datos/`, descargado, pasa `python -m common.results_schema`. El archivo pasa de 0,22 a 0,25 MB.
+  - En el total, el WAPE del mes 3 queda cerca del mes 2: 19,2 % contra 19,1 % en el champion.
+
+---
+
 ## Fase 10. Ensayo de sustentación (Manual, con ayuda de Claude Code)
 
 - [ ] Hacer un cambio pequeño en una rama (por ejemplo, agregar un algoritmo o ajustar un parámetro) y recorrer el flujo completo: PR → CI verde → merge → CD → job → página actualizada

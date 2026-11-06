@@ -181,9 +181,13 @@ Vienen del proyecto de experimentación, validadas con backtest. La tesis las re
       - con los restos sin juntar, como en la primera versión del PR, 3,12 %;
       - publicando también por el pronóstico, 2,24 %. Por eso tampoco se publica por el pronóstico.
   - **Las métricas de cada nodo** (`series[].metricas`) son, para los 6 modelos y en el orden de `metricas`:
-    - WAPE M1, M2 y total, MAPE M1, M2 y total (como dato) y sesgo total;
+    - WAPE M1, M2, M3 y total, MAPE M1, M2, M3 y total (como dato), sesgo total y MAE;
     - salen del backtest del train de la versión que pronosticó, con la venta y el pronóstico sumados al nodo por origen y ventana;
-    - sin MAE ni RMSE, que van en piezas.
+    - **el mes 3 no es parte del formato estándar** (`metrics.mes_tres`): la raíz, `train`, `metricas_modelos` y el monitoreo siguen sin él. Se agregó en la fase 9e, a pedido de la web, dentro de la versión 2;
+    - **el MAE va en índice, con el mismo factor y con 1 decimal** (`results_schema.DECIMALES_MAE_NODO`), y `validar` lo exige.
+      - Con 4 decimales, el MAE y el WAPE de cada mes de los 6 modelos dejarían despejar la venta del nodo en cada mes del backtest con un error menor a una pieza, y con todos los nodos se podría buscar el factor.
+      - Es el MAE de las celdas origen × ventana del nodo, así que el del total no es el de la raíz, que promedia celdas serie × ventana;
+    - sin RMSE.
     - El WAPE baja al subir de nivel: en dev, la mediana del WAPE total del champion va de 31,3 % en las series a 14,7 % en el total.
   - **Los 4 campos de la fase 9b** van en cada nodo: `real_hasta`, `real_horizonte`, `ventanas_real` y `pronostico_anterior`.
   - **`validar` revisa además:**

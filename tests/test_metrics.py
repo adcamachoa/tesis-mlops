@@ -10,6 +10,7 @@ from common.metrics import (
     formato_estandar,
     mae,
     mape,
+    mes_tres,
     perfil_semanal,
     pesos_ventanas,
     por_origen,
@@ -100,6 +101,17 @@ def test_formato_estandar_no_cancela_errores_entre_meses():
     assert metricas["sesgo_total"] == pytest.approx(0)
     assert metricas["mae"] == pytest.approx(200 / 3)
     assert metricas["rmse"] == pytest.approx(np.sqrt(20000 / 3))
+
+
+def test_el_mes_3_va_aparte_del_formato_estandar():
+    ventanas = pd.DataFrame(
+        {"origen": LUNES, "serie": ["A", "A", "A", "B", "B", "B"], "ventana": [1, 2, 3] * 2,
+         "real": [100.0, 100.0, 100.0, 50.0, 50.0, 0.0], "pronostico": [100.0, 100.0, 70.0, 50.0, 50.0, 10.0]}
+    )
+    assert "wape_m3" not in formato_estandar(ventanas)
+    tercera = mes_tres(ventanas)
+    assert tercera["wape_m3"] == pytest.approx(40 / 100)  # (30 + 10) / 100
+    assert tercera["mape_m3"] == pytest.approx(0.3)  # solo la celda con venta
 
 
 def test_por_origen_mide_cada_origen_por_separado():
