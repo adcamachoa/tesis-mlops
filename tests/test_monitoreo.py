@@ -350,15 +350,68 @@ def test_la_corrida_que_hace_cada_medicion():
             assert (f"{o.date()}", m) not in _medido_en(corridas, f"{(lunes - pd.Timedelta(days=8)).date()}")
 
 
+def _corridas(origenes, fechas, versiones=None) -> pd.DataFrame:
+    return pd.DataFrame({"fecha_corrida": pd.to_datetime(fechas, format="ISO8601"), "origen": pd.to_datetime(origenes),
+                         "modelo_version": versiones if versiones is not None else range(1, len(fechas) + 1)})
+
+
+def _medido(cerradas: pd.DataFrame, abiertas: pd.DataFrame) -> set[tuple[str, int, str]]:
+    """Origen, versión y medición de todo lo que se mide, ya cerrado o no."""
+    juntas = pd.concat([cerradas, abiertas])
+    return {(f"{o.date()}", v, m)
+            for o, v, m in zip(juntas["origen"], juntas["modelo_version"], juntas["medicion"], strict=True)}
+
+
 def test_lo_ya_medido_no_se_vuelve_a_medir():
-    corridas = pd.DataFrame({"fecha_corrida": pd.to_datetime(["2026-10-28 16:28", "2026-10-28 17:47"]),
-                             "origen": pd.to_datetime(["2026-10-12", "2026-10-12"])})
+    corridas = _corridas(["2026-10-12"], ["2026-10-28 16:28"])
     medidas = _medidas(["2026-10-12"], ["mes_1"], [False], corridas=["2026-10-28 16:28"])
     cerradas, abiertas = monitoreo.por_medir(corridas, medidas, pd.Timestamp("2026-12-20"))
-    assert sorted(zip(cerradas["fecha_corrida"].dt.hour, cerradas["medicion"], strict=True)) == [
-        (16, "mes_2"), (17, "mes_1"), (17, "mes_2")]
-    assert set(abiertas["medicion"]) == {"total"}
-    assert set(cerradas["cierre"].dt.date.astype(str)) == {"2026-11-18", "2026-12-18"}
+    assert cerradas["medicion"].tolist() == ["mes_2"]
+    assert abiertas["medicion"].tolist() == ["total"]
+    assert cerradas["cierre"].dt.date.astype(str).tolist() == ["2026-12-18"]
+
+
+def test_de_cada_origen_se_mide_solo_su_ultima_corrida():
+    # el caso de prod: el 12-oct se rehízo el 4-nov con el catálogo corregido (fase 9d); desordenadas, a propósito
+    corridas = _corridas(["2026-11-09", "2026-10-12", "2026-10-12", "2026-11-09"],
+                         ["2026-11-17 14:00", "2026-11-05 02:57:17", "2026-10-28 23:22:23", "2026-11-16 14:00"],
+                         versiones=[4, 2, 1, 3])
+    cerradas, abiertas = monitoreo.por_medir(corridas, _medidas([], [], []), pd.Timestamp("2026-11-22"))
+    assert _medido(cerradas, abiertas) == {(o, v, m) for o, v in (("2026-10-12", 2), ("2026-11-09", 4))
+                                           for m in monitoreo.MEDICIONES}
+    assert list(zip(cerradas["modelo_version"], cerradas["medicion"], strict=True)) == [(2, "mes_1")]
+    _, ignoradas = monitoreo.corridas_vigentes(corridas)
+    assert sorted(zip(ignoradas["modelo_version"], ignoradas["motivo"], strict=True)) == [
+        (1, "hay una corrida posterior"), (3, "hay una corrida posterior")]
+
+
+def test_una_corrida_hecha_despues_del_cierre_del_mes_1_no_se_mide():
+    # ya pudo ver la venta real del mes 1, que también entra en el total: la anterior sigue en las tres mediciones
+    corridas = _corridas(["2026-10-12", "2026-10-12"], ["2026-10-20 14:00", "2026-11-25 14:00"])
+    cerradas, abiertas = monitoreo.por_medir(corridas, _medidas([], [], []), pd.Timestamp("2026-11-22"))
+    assert _medido(cerradas, abiertas) == {("2026-10-12", 1, m) for m in monitoreo.MEDICIONES}
+    _, ignoradas = monitoreo.corridas_vigentes(corridas)
+    assert list(zip(ignoradas["modelo_version"], ignoradas["motivo"], strict=True)) == [
+        (2, "se hizo después del cierre del mes 1")]
+    # y si el mes 1 de la anterior ya se midió, de la nueva no se mide nada
+    medidas = _medidas(["2026-10-12"], ["mes_1"], [False], corridas=["2026-10-20 14:00"])
+    cerradas, abiertas = monitoreo.por_medir(corridas, medidas, pd.Timestamp("2026-12-20"))
+    assert _medido(cerradas, abiertas) == {("2026-10-12", 1, "mes_2"), ("2026-10-12", 1, "total")}
+
+
+def test_la_frontera_es_el_fin_del_dia_del_cierre_del_mes_1():
+    # el mes 1 del 12-oct va del 19-oct al 18-nov
+    assert monitoreo.cierre(pd.Timestamp("2026-10-12"), "mes_1") == pd.Timestamp("2026-11-18")
+    for hasta, vigente in (("2026-11-18 23:59:59", 2), ("2026-11-19 00:00:00", 1)):
+        corridas = _corridas(["2026-10-12", "2026-10-12"], ["2026-10-20 14:00", hasta])
+        vigentes, _ = monitoreo.corridas_vigentes(corridas)
+        assert vigentes["modelo_version"].tolist() == [vigente]
+
+
+def test_un_origen_sin_corridas_a_tiempo_no_se_mide():
+    corridas = _corridas(["2026-10-12"], ["2026-11-20 14:00"])
+    cerradas, abiertas = monitoreo.por_medir(corridas, _medidas([], [], []), pd.Timestamp("2026-12-20"))
+    assert cerradas.empty and abiertas.empty
 
 
 def test_reentrena_cada_4_semanas_o_a_mano():

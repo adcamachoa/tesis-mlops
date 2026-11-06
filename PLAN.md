@@ -230,6 +230,8 @@ Pendiente:
   - Quedó 13 % debajo de las mismas semanas del año anterior, aunque las últimas 4 semanas antes del origen iban +8,7 %.
   - Hay que ver si el modelo subpronosticó el Buen Fin y diciembre: WAPE y sesgo por ventana, en el formato estándar.
   - La corrida está en `workspace.tesis_dev.predicciones`, con `fecha_corrida` 2026-10-28 16:28:09, y tiene un respaldo en `workspace.tesis_dev.predicciones_respaldo_20261028` (las mismas 7.424 filas).
+  - **Hay que medirla a mano** (nota del 6-nov-2026, fase 9d). El job nunca la va a medir: dev se queda con datos al 18-oct, y su corrida vigente es la versión 4.
+    - Está en el catálogo anterior al 2-nov. Por tipo de producto, hay que medirla con ese catálogo (`data/productos.parquet`), y los SKU nuevos quedan fuera. Si no, solo a nivel total.
 
 ---
 
@@ -1062,7 +1064,7 @@ Resultado:
   | Versión 1 (28-oct, catálogo anterior) | 35,5 % | 45,0 % | 36,4 % | +2,7 % | 43,8 % |
   | Versión 2 (4-nov, catálogo corregido) | 35,3 % | 44,8 % | 36,3 % | +2,3 % | 43,7 % |
 
-- **`monitoreo_desempeno` mide las dos corridas del 12-oct.** La de la versión 1 cruza sus series viejas con la venta en el catálogo nuevo, así que no es comparable: el rango de su backtest sale de 41,5 % a 70,4 % en WAPE M1, contra 23,7 % a 49,1 % en la versión 2. Para la tesis cuenta la de la versión 2.
+- **`monitoreo_desempeno` medía las dos corridas del 12-oct.** La de la versión 1 cruza sus series viejas con la venta en el catálogo nuevo, así que no es comparable: el rango de su backtest sale de 41,5 % a 70,4 % en WAPE M1, contra 23,7 % a 49,1 % en la versión 2. Desde el 6-nov solo se mide la corrida vigente (ver abajo).
 - **Aviso de cobertura:** `filas_venta` da 0,75 en la semana del 26-oct, justo en el umbral, igual que el 2-nov con los mismos datos. La venta entre salidas del mes da 0,76, estable. Hay que revisar el lunes 9-nov si la semana nueva vuelve a lo normal.
 
 Pendiente: protección automática.
@@ -1072,6 +1074,28 @@ Pendiente: protección automática.
   - guardar con cada pronóstico una foto del catálogo (SKU → serie);
   - antes de cruzar un pronóstico con la venta real, en el export y en `monitoreo_desempeno`, traducirlo al catálogo vigente, repartiendo cada serie vieja entre las nuevas según la venta de sus SKU hasta el origen y conservando el total;
   - dar un aviso en `monitoreo_datos` cuando el catálogo cambie mucho, sin detener el job.
+
+El monitoreo mide solo la corrida vigente (decisión del 6-nov-2026):
+- **La regla.** De cada origen se mide solo la última corrida hecha antes de que cierre la ventana del mes 1, en las 3 mediciones (`monitoreo.corridas_vigentes`). El log nombra las demás y por qué no se miden.
+  - En prod, desde el 23-nov se mide solo la versión 2 del 12-oct.
+  - La decisión de reentrenar sigue mirando todas las corridas.
+- **El candado, al cierre del mes 1 y no por ventana.** Lo propuso la revisión de un agente data scientist senior:
+  - el total incluye el mes 1, así que una corrida hecha después de ese cierre ya vio parte de lo que se mide;
+  - aplicado por ventana, mezclaba corridas y podía dejar el mes 1 sin medir.
+  - La frontera es el fin del día del cierre, y no el lunes de la medición, porque la venta diaria se puede consultar antes.
+  - En la operación normal no actúa: la corrida se hace unos 8 días después del origen, y el mes 1 cierra a los ~37.
+- **El criterio para la tesis.** Un pronóstico solo se rehace por una razón ajena a su resultado, antes de que cierre su mes 1, con datos hasta su origen, y la corrida vieja queda en la tabla.
+  - La objeción esperable es que el 12-oct se rehízo con 2 semanas del horizonte ya cargadas.
+  - La respuesta: el disparador fue la falla del export el 2-nov y el 4-nov, el train se recortó al 18-oct con el mismo algoritmo y la misma regla de champion, todavía no había ninguna medición, y las dos corridas quedan guardadas.
+- **De paso, un error de `por_medir`.** Con una lista vacía, pandas elegía columnas y no filas, y la columna `cierre` perdía el tipo de fecha. Habría fallado con una tabla `predicciones` sin corridas, y con la regla nueva, también con un origen sin corridas a tiempo.
+- **Verificación (6-nov-2026).**
+  - `make lint` pasa y `make test` da 185 pruebas en verde.
+  - Las nuevas cubren corridas desordenadas de varios orígenes, el caso de prod, una corrida hecha después del cierre (antes y después de medir el mes 1 de la anterior), la frontera de 23:59:59 contra 00:00 y un origen sin corridas a tiempo.
+  - En dev, con `--only monitoreo_desempeno`, el log dice que las versiones 2 y 3 del 12-oct no se miden porque hay una corrida posterior, y quedan 3 mediciones abiertas de la versión 4, donde antes eran 9. La decisión de reentrenar no cambió.
+
+Pendiente:
+- [ ] Revisar en el log de prod del lunes 9-nov o del 16-nov que el 12-oct sale solo con la versión 2, con 3 mediciones abiertas y una línea para la versión 1. La prueba en dev solo ejerce las mediciones abiertas, porque dev no cierra ventanas.
+- [ ] **En enero de 2027, una sensibilidad.** El WAPE y el sesgo de las versiones 1 y 2 del 12-oct, a nivel total, que no depende del catálogo. Si coinciden, el reemplazo no eligió al ganador.
 
 ---
 

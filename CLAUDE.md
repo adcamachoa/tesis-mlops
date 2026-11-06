@@ -239,7 +239,13 @@ Los umbrales se fijaron el 28-oct-2026, antes de ver resultados en vivo, con la 
   - **Liberar el freno.** El job tiene el parámetro `aceptar_drift`, que recibe la fecha del origen.
     - Solo vale para ese origen y queda anotado en la tabla.
     - Con el stock atrasado, liberarlo repite el pronóstico desde el mismo origen.
-- **Drift de desempeño.** Lo revisa la tarea `monitoreo_desempeno`, antes de la condición `toca_reentrenar`, y lo agrega a la tabla `monitoreo_desempeno`, de solo agregar, con una fila por corrida de `predicciones` × medición.
+- **Drift de desempeño.** Lo revisa la tarea `monitoreo_desempeno`, antes de la condición `toca_reentrenar`, y lo agrega a la tabla `monitoreo_desempeno`, de solo agregar, con una fila por corrida vigente × medición.
+  - **De cada origen se mide solo su corrida vigente:** la última hecha antes de que cierre la ventana del mes 1 (`monitoreo.corridas_vigentes`). Esa corrida vale para las 3 mediciones. El log nombra las demás corridas y por qué no se miden. Decisión del 6-nov-2026, en la fase 9d de PLAN.md.
+    - Normalmente es la misma corrida que publica la página. Solo cambia si un pronóstico se rehace después de ese cierre: esa corrida ya pudo ver la venta real, y el total incluye el mes 1, así que sigue la anterior.
+    - **Un pronóstico solo se rehace por una razón ajena a su resultado,** como un cambio de catálogo: antes de que cierre su mes 1, con datos hasta su origen, y con la corrida vieja guardada en la tabla.
+    - La frontera es el fin del día del cierre. `fecha_corrida` va en UTC, unas horas después que la hora de Bogotá, así que la frontera queda un poco más estricta.
+  - **La medición y el rango usan la venta y el catálogo del día en que se mide.** Por eso, después de un cambio de jerarquía, el rango de una versión entrenada con el catálogo anterior sale inflado.
+  - **La columna `estado` es una foto del momento de medir.** Para la tesis, hay que recalcularla con `monitoreo.estados`.
   - **Cada ventana se mide apenas cierra,** en la primera corrida después de su último día, con el formato estándar. La regla por ventana se fijó el 29-oct-2026, antes de que cerrara ninguna ventana en vivo.
 
     | Medición | Cuándo | Alerta | Solo dato |

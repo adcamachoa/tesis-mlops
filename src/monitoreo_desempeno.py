@@ -4,13 +4,15 @@ Se corre en Databricks como spark_python_task, después de monitoreo_datos y ant
     python src/monitoreo_desempeno.py --schema tesis_dev
     python src/monitoreo_desempeno.py --schema tesis_dev --reentrenar si   # entrena y pronostica aunque no toque
 
-Busca en <catalogo>.<schema>.predicciones las mediciones de cada corrida (mes 1, mes 2 y total) cuya ventana ya cerró
-hasta el último domingo de features y que todavía no están en <catalogo>.<schema>.monitoreo_desempeno. Mide cada una
-desde las filas semanales, con el mismo código del backtest (common.metrics), y la compara con el mínimo y el máximo
-por origen del backtest donde se registró la versión que pronosticó: el artefacto predicciones_backtest.parquet de ese
-run de MLflow, que se guardó al entrenar. Agrega una fila por corrida × medición, con su estado
-(common.monitoreo.estados), a una tabla de solo agregar. Para las mediciones que todavía no cierran, imprime cuándo
-cierra la siguiente y el rango con que se medirá.
+Busca en <catalogo>.<schema>.predicciones las mediciones de la corrida vigente de cada origen (mes 1, mes 2 y total)
+cuya ventana ya cerró hasta el último domingo de features y que todavía no están en
+<catalogo>.<schema>.monitoreo_desempeno. La vigente es la última hecha antes de que cierre el mes 1
+(common.monitoreo.corridas_vigentes); el log nombra las demás y por qué no se miden. Mide cada medición desde las
+filas semanales, con el mismo código del backtest (common.metrics), y la compara con el mínimo y el máximo por origen
+del backtest donde se registró la versión que pronosticó: el artefacto predicciones_backtest.parquet de ese run de
+MLflow, que se guardó al entrenar. La medición y el rango usan la venta y el catálogo del día en que se mide. Agrega
+una fila por corrida vigente × medición, con su estado (common.monitoreo.estados), a una tabla de solo agregar. Para
+las mediciones que todavía no cierran, imprime cuándo cierra la siguiente y el rango con que se medirá.
 
 Al final decide si toca reentrenar (common.monitoreo.decidir_reentrenamiento: cada 4 semanas desde el último origen
 pronosticado, o con reentrenar=si) y lo publica como task value `reentrenar`, que lee la condición toca_reentrenar. Una
@@ -92,6 +94,10 @@ def main():
             df[columna] = pd.to_datetime(df[columna])
 
     corridas = semanales[CORRIDA].drop_duplicates().sort_values(["origen", "fecha_corrida"], ignore_index=True)
+    _, ignoradas = monitoreo.corridas_vigentes(corridas)
+    for ignorada in ignoradas.itertuples(index=False):
+        print(f"origen {ignorada.origen.date()}: no se mide la corrida {ignorada.fecha_corrida} (versión "
+              f"{ignorada.modelo_version}): {ignorada.motivo}")
     cerradas, abiertas = monitoreo.por_medir(corridas, previas, real_hasta)
     print(f"origen {origen.date()}, venta hasta el {real_hasta.date()}: {len(cerradas)} mediciones por hacer y "
           f"{len(abiertas)} con su ventana abierta")
