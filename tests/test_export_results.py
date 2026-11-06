@@ -341,25 +341,39 @@ def test_cada_nodo_suma_a_sus_hijos(resultados):
 
 
 def test_las_metricas_de_cada_nodo_salen_de_su_backtest_sumado_al_nodo(tablas, publicacion):
-    """En una serie, el formato estándar de esa serie sola; en el total, el WAPE y el sesgo del total. Cada origen usa
-    el backtest del train de su versión."""
+    """En una serie, el formato estándar de esa serie sola, más el mes 3 y el MAE en índice; en el total, el WAPE de
+    cada mes, el sesgo y el MAE del total. Cada origen usa el backtest del train de su versión."""
     for archivo, train in (("nuevo", "train-nuevo"), ("viejo", "train-viejo")):
         resultados = publicacion[1][tablas[archivo]]
-        nodos = _nodos(resultados)
+        nodos, factor = _nodos(resultados), _factor(tablas, resultados)
         modelos = [m["modelo"] for m in resultados["metricas"]]
         assert all([m["modelo"] for m in n["metricas"]] == modelos for n in resultados["series"])
         for modelo in modelos:
             ventanas = metrics.a_ventanas(tablas["backtests"][f"{train}/{modelo}"], tablas["venta_diaria"])
             de = {m["modelo"]: m for m in nodos["submarca-a/depto-1/cat-1/tipo-1"]["metricas"]}[modelo]
-            esperado = metrics.formato_estandar(ventanas[ventanas["serie"] == "Submarca A | Depto 1 | Cat 1 | Tipo 1"])
+            de_la_serie = ventanas[ventanas["serie"] == "Submarca A | Depto 1 | Cat 1 | Tipo 1"]
+            esperado = metrics.formato_estandar(de_la_serie) | metrics.mes_tres(de_la_serie)
             for m in METRICAS_NODO:
-                assert de[m] == pytest.approx(esperado[m], abs=1e-4), (archivo, modelo, m)
+                if m != "mae":
+                    assert de[m] == pytest.approx(esperado[m], abs=1e-4), (archivo, modelo, m)
+            assert de["mae"] == pytest.approx(esperado["mae"] * factor, abs=REDONDEO), (archivo, modelo)
             total = {m["modelo"]: m for m in nodos["total"]["metricas"]}[modelo]
-            mes_1 = ventanas[ventanas["ventana"] == 1].groupby("origen")[["real", "pronostico"]].sum()
-            assert total["wape_m1"] == pytest.approx(
-                (mes_1["real"] - mes_1["pronostico"]).abs().sum() / mes_1["real"].sum(), abs=1e-4)
+            sumadas = ventanas.groupby(["origen", "ventana"])[["real", "pronostico"]].sum()
+            for numero in (1, 3):
+                mes = sumadas.xs(numero, level="ventana")
+                assert total[f"wape_m{numero}"] == pytest.approx(
+                    (mes["real"] - mes["pronostico"]).abs().sum() / mes["real"].sum(), abs=1e-4)
             assert total["sesgo_total"] == pytest.approx(
                 ventanas["pronostico"].sum() / ventanas["real"].sum() - 1, abs=1e-4)
+            assert total["mae"] == pytest.approx(
+                (sumadas["real"] - sumadas["pronostico"]).abs().mean() * factor, abs=REDONDEO)
+
+
+def test_el_mae_de_cada_nodo_va_con_1_decimal(resultados):
+    """Como la venta: con más decimales, junto con el WAPE de cada mes, dejaría despejar la escala."""
+    maes = [m["mae"] for nodo in resultados["series"] for m in nodo["metricas"]]
+    assert maes and all(v is not None and round(v, 1) == v for v in maes)
+    assert max(maes) > 0
 
 
 def test_sin_el_backtest_de_un_modelo_no_se_exporta(tablas):
@@ -406,6 +420,8 @@ CAMBIOS = {
     "venta del horizonte que no cuadra": (lambda r: r["series"][4]["real_horizonte"].__setitem__(0, 0.0),
                                           "no suman el nodo en real_horizonte"),
     "métricas de otros modelos": (lambda r: r["series"][3]["metricas"].pop(), "mismos modelos"),
+    "MAE del nodo con 4 decimales": (lambda r: r["series"][3]["metricas"][0].update(mae=1.2345), "más de 1 decimal"),
+    "nodo sin el mes 3": (lambda r: r["series"][3]["metricas"][0].pop("wape_m3"), "wape_m3"),
 }
 
 

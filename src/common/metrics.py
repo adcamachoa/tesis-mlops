@@ -165,6 +165,14 @@ def formato_estandar(ventanas: pd.DataFrame) -> dict[str, float]:
     return {m: metricas[m] for m in METRICAS}
 
 
+def mes_tres(ventanas: pd.DataFrame) -> dict[str, float]:
+    """WAPE y MAPE de la ventana 3, como los del mes 1 y el mes 2. No son parte del formato estándar: van solo en las
+    métricas de cada nodo de la página."""
+    tercera = ventanas[ventanas["ventana"] == 3]
+    return {"wape_m3": wape(tercera["real"], tercera["pronostico"]),
+            "mape_m3": mape(tercera["real"], tercera["pronostico"])}
+
+
 def por_origen(ventanas: pd.DataFrame) -> pd.DataFrame:
     """El formato estándar de cada origen por separado: una fila por origen y una columna por métrica."""
     return pd.DataFrame({origen: formato_estandar(v) for origen, v in ventanas.groupby("origen")}).T
