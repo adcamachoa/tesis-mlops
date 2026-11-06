@@ -8,9 +8,10 @@ Funciones puras en pandas. Los umbrales están documentados en CLAUDE.md.
   del mes contra las semanas que ya revisó la corrida anterior (SKU con stock y venta entre salidas de stock) y que el
   stock llegue a la última semana con venta. Un nivel extremo detiene el job antes de entrenar, salvo que una persona
   lo acepte para ese origen.
-- Desempeño: mide cada ventana de cada pronóstico en vivo apenas cierra (el mes 1, el mes 2 y, al cerrar el mes 3, el
-  total), con el formato estándar, y la compara con el mínimo y el máximo por origen del backtest de la versión que
-  pronosticó. Una alerta es una señal para revisar el modelo: no adelanta el reentrenamiento, que va cada 4 semanas.
+- Desempeño: mide cada ventana del pronóstico vigente de cada origen apenas cierra (el mes 1, el mes 2 y, al cerrar el
+  mes 3, el total), con el formato estándar, y la compara con el mínimo y el máximo por origen del backtest de la
+  versión que pronosticó. Una alerta es una señal para revisar el modelo: no adelanta el reentrenamiento, que va cada 4
+  semanas.
 
 Nada de esto lleva piezas: el PSI, la parte de nulos, las coberturas, el WAPE, el MAPE y el sesgo son proporciones.
 """
@@ -323,17 +324,37 @@ def corrida_de_medicion(origen: pd.Timestamp, medicion: str) -> pd.Timestamp:
     return fin + pd.Timedelta(days=7 - fin.dayofweek)
 
 
+def corridas_vigentes(corridas: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """De cada origen, la corrida que se mide, y las que no, con su `motivo` (`corridas` trae una fila por
+    fecha_corrida y origen).
+
+    La vigente es la última hecha antes de que cierre la ventana del mes 1: la misma que publica results.json, salvo
+    que un pronóstico se rehaga después de ese cierre. Esa corrida ya pudo ver la venta real de lo que se mediría, así
+    que sigue la anterior en las tres mediciones (el total incluye el mes 1). La frontera es el fin del día del cierre,
+    y fecha_corrida va en UTC, unas horas después que en Bogotá: un poco más estricta.
+    """
+    limite = corridas["origen"].map(lambda o: cierre(o, "mes_1") + pd.Timedelta(days=1))
+    a_tiempo = corridas["fecha_corrida"] < limite
+    vigentes = corridas[a_tiempo].sort_values(["origen", "fecha_corrida"]).groupby("origen").tail(1)
+    ignoradas = corridas.drop(index=vigentes.index)
+    motivo = np.where(a_tiempo[ignoradas.index], "hay una corrida posterior", "se hizo después del cierre del mes 1")
+    return vigentes.reset_index(drop=True), ignoradas.assign(motivo=motivo).reset_index(drop=True)
+
+
 def por_medir(
     corridas: pd.DataFrame, medidas: pd.DataFrame, real_hasta: pd.Timestamp
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Las mediciones de cada corrida de predicciones (`corridas`, una fila por fecha_corrida y origen) que todavía no
-    están en `medidas`, con su `medicion` y su `cierre`, separadas en las que ya cerraron (`cierre` a lo más
-    `real_hasta`, el último domingo con venta) y las que no."""
-    filas = corridas.merge(pd.DataFrame({"medicion": list(MEDICIONES)}), how="cross")
-    filas["cierre"] = [cierre(o, m) for o, m in zip(filas["origen"], filas["medicion"], strict=True)]
+    """Las mediciones de la corrida vigente de cada origen (`corridas_vigentes`) que todavía no están en `medidas`, con
+    su `medicion` y su `cierre`, separadas en las que ya cerraron (`cierre` a lo más `real_hasta`, el último domingo con
+    venta) y las que no."""
+    vigentes, _ = corridas_vigentes(corridas)
+    filas = vigentes.merge(pd.DataFrame({"medicion": list(MEDICIONES)}), how="cross")
+    # pd.to_datetime para que, sin filas, la columna siga siendo de fechas y se pueda comparar con real_hasta
+    filas["cierre"] = pd.to_datetime([cierre(o, m) for o, m in zip(filas["origen"], filas["medicion"], strict=True)])
     claves = ["fecha_corrida", "origen", "medicion"]
     ya = set(medidas[claves].itertuples(index=False, name=None))
-    nuevas = filas[[c not in ya for c in filas[claves].itertuples(index=False, name=None)]]
+    sin_medir = [c not in ya for c in filas[claves].itertuples(index=False, name=None)]
+    nuevas = filas[np.array(sin_medir, dtype=bool)]  # con una lista vacía, pandas elegiría columnas y no filas
     cerradas = nuevas["cierre"] <= real_hasta
     return nuevas[cerradas].reset_index(drop=True), nuevas[~cerradas].reset_index(drop=True)
 
